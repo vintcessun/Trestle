@@ -1,0 +1,88 @@
+// Trestle 插件接口草案 (WIT / Component Model)
+//
+// 状态：草案。v0.1 不实现 WASM 宿主，但 Rust 侧的 trait 会按这个形状定义，
+// 这样 v0.3 接入 Wasmtime 时是"加一个 backend"，不是重构。
+//
+// 设计原则：插件**没有**任何自己的 I/O 能力。它能做的一切都必须经由 host 导入的
+// base 能力，且每次调用都由 host 按 manifest 里的 capability 检查。
+// 这是沙箱能成立的前提——如果插件能自己开 socket / 起进程，权限模型就是白做的。
+
+package trestle:plugin@0.1.0;
+
+/// host 提供给插件的基础能力。对应 Rust 侧唯一的 BaseService 实现。
+interface base {
+    record exec-result {
+        exit-code: s32,
+        stdout: string,
+        stderr: string,
+        timed-out: bool,
+    }
+
+    record read-result {
+        content: string,
+        total-lines: u32,
+        truncated: bool,
+    }
+
+    variant edit-op {
+        literal(literal-edit),
+        regex(regex-edit),
+        lines(lines-edit),
+        insert(insert-edit),
+    }
+
+    record literal-edit { old: string, new: string, count: u32 }
+    record regex-edit   { pattern: string, replacement: string, count: u32, flags: string }
+    record lines-edit   { start: u32, end: u32, replacement: string }
+    record insert-edit  { before-line: u32, content: string }
+
+    /// 所有调用都必须显式指定 target —— 没有默认机
+    read:  func(target: string, path: string, start-line: option<u32>, max-lines: option<u32>)
+             -> result<read-result, string>;
+
+    write: func(target: string, path: string, content: string, append: bool)
+             -> result<u64, string>;
+
+    edit:  func(target: string, path: string, op: edit-op)
+             -> result<bool, string>;
+
+    /// 短命令，有超时；超时会杀掉整个进程组
+    shell-exec: func(target: string, command: string, cwd: option<string>, timeout-secs: option<u32>)
+             -> result<exec-result, string>;
+
+    /// 长任务，setsid 脱离；返回 job-id
+    shell-spawn: func(target: string, command: string, cwd: option<string>, name: option<string>)
+             -> result<string, string>;
+}
+
+/// 插件向 host 发事件（会进 EventBus，最终到 Monitor 的 WebSocket）
+interface events {
+    enum level { debug, info, warn, error }
+    emit: func(lvl: level, message: string);
+    /// 长动作的进度，Monitor 可以据此画进度
+    progress: func(done: u32, total: u32, message: string);
+}
+
+/// 插件必须导出的接口
+interface tools {
+    record tool-info {
+        name: string,          // 不带 namespace，host 会加前缀
+        description: string,
+        input-schema: string,  // JSON Schema 字符串
+    }
+
+    /// 插件命名空间，如 "docker"。host 会把工具暴露成 docker_logs
+    namespace: func() -> string;
+
+    /// 声明本插件提供哪些工具。host 启动时读一次（不实例化也能读，见 lazy 设计）
+    list: func() -> list<tool-info>;
+
+    /// 执行。arguments 是 JSON 字符串，返回也是 JSON 字符串
+    call: func(name: string, arguments-json: string) -> result<string, string>;
+}
+
+world tool-plugin {
+    import base;
+    import events;
+    export tools;
+}

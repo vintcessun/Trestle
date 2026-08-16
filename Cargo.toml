@@ -1,0 +1,65 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/trestle-core",
+    "crates/trestle-connectors",
+    "crates/trestle-base",
+    "crates/trestle-agent",
+    "crates/trestle-daemon",
+    "crates/trestle-mcp",
+    "crates/trestle-cli",
+    "crates/trestle-plugin-host",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT"
+repository = "https://github.com/vintcessun/trestle"
+
+# 版本已于 2026-08-17 在 crates.io 核实，并用一个 probe crate 跑通 `cargo fetch`
+# （365 个包全部 resolve 干净，锁定结果见下方注释）。各 crate 目前尚未引用它们，
+# 所以 cargo check 不会去下载 —— 开工时逐个启用。
+#
+# 实测锁定：rmcp 3.1.2 / russh 0.62.6 / axum 0.8.9 / tokio 1.53.1 / schemars 1.2.2
+#           toml 1.1.4 / tokio-tungstenite 0.30.0 / base64 0.23.1 / sha2 0.11.0
+# 注：sha2 会出现 0.10 与 0.11 共存、thiserror 1 与 2 共存（russh 等依赖旧版），正常。
+[workspace.dependencies]
+# MCP 官方 Rust SDK。⚠️ 3.x 相对 docs/reference 那份对话里的 2.x 示例有 breaking change，
+# 宏 #[tool]/#[tool_router]/#[tool_handler] 仍在，transport 只有 stdio 与 streamable-http。
+rmcp = { version = "3.1", features = ["server", "macros", "transport-io"] }
+# 纯 Rust SSH，async。支持把自定义流作为传输 —— Connector::dial 的返回值直接喂给它。
+russh = "0.62"
+russh-keys = "0.49"
+# 插件运行时，v0.3 才启用
+wasmtime = "47"
+
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "process", "time", "sync", "fs"] }
+tokio-tungstenite = "0.30"      # Monitor 的 WebSocket 服务端
+axum = "0.8"                    # Monitor HTTP + /monitor/ws（最新稳定是 0.8.9，没有 0.9）
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1"
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+schemars = "1"                  # 工具入参的 JSON Schema
+clap = { version = "4", features = ["derive"] }
+async-trait = "0.1"
+sha2 = "0.11"
+base64 = "0.23"
+globset = "0.4"                 # 目录传输的 exclude 匹配
+directories = "6"               # daemon.json 的落点
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+
+# 远端 agent 要小：它每次部署都要经 SSH 传过去
+[profile.agent]
+inherits = "release"
+opt-level = "z"
+panic = "abort"
