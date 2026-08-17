@@ -1,4 +1,4 @@
-# 编译所有插件到 wasm 并放到 plugins/<kind>/<name>/<name>.wasm。
+﻿# 编译所有插件到 wasm 并放到 plugins/<kind>/<name>/<name>.wasm。
 #
 # cargo 产出的文件名是下划线（ssh_socks5.wasm），而 manifest 里的名字是
 # 连字符（ssh-socks5）——host 按 manifest 名字找文件，所以这里要改名。

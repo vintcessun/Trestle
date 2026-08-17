@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     编译 Trestle、装成一个自包含的目录，并把它注册给 Claude Code 与 Codex。
 
