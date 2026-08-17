@@ -178,5 +178,5 @@ jobs:
             Windows 上也可以直接跑 `install.ps1 -Register`，它会把目录装好
             并注册给 Claude Code 与 Codex。
 
-            > 目前只在 Windows 上做过真机验证。Linux 与 macOS 的包由 CI 构建，
-            > 离线测试在这三个平台上都跑过，但连真实服务器那部分没有。
+            > Windows 与 Linux 都跑过完整的离线测试套件；连真实服务器的那部分
+            > 只在 Windows 上验证过。macOS 的包由 CI 构建并跑离线测试，没有手工验证。

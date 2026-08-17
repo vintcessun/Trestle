@@ -1,0 +1,18 @@
+# 行尾。没有这个文件的话，Windows 上 clone 出来的 shell 脚本会带 CRLF，
+# 于是 `#!/usr/bin/env bash` 变成 `bash\r`，Linux 直接报
+# "/usr/bin/env: 'bash\r': No such file or directory"。踩过一次。
+* text=auto eol=lf
+
+# Windows 原生的东西留 CRLF。
+*.ps1   text eol=crlf
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+
+# 这些必须是 LF，否则在 Linux 上跑不了。
+*.sh    text eol=lf
+
+# 二进制，别碰。
+*.wasm  binary
+*.png   binary
+*.jpg   binary
+*.ico   binary

@@ -34,6 +34,10 @@ while [ $# -gt 0 ]; do
 done
 mkdir -p "$dest"; dest="$(cd "$dest" && pwd)"
 
+# 尊重 CARGO_TARGET_DIR：在 WSL 里跑的时候它通常被指到别处，
+# 因为仓库挂在 /mnt/ 下时 WSL 与 Windows 会共用同一个 target/。
+target_dir="${CARGO_TARGET_DIR:-target}"
+
 step() { printf '\033[36m==> %s\033[0m\n' "$*"; }
 note() { printf '    %s\n' "$*"; }
 warn() { printf '\033[33m    ! %s\033[0m\n' "$*"; }
@@ -60,6 +64,9 @@ if [ "$skip_build" -eq 0 ]; then
 
     step '编插件到 wasm'
     rustup target add wasm32-wasip2 >/dev/null 2>&1 || true
+    # 插件各自是独立的 workspace，产物要留在自己目录下（host 按这个路径找），
+    # 所以这里不能让外面的 CARGO_TARGET_DIR 把它们也搬走。
+    unset CARGO_TARGET_DIR
     while read -r manifest; do
         dir="$(dirname "$manifest")"
         name="$(sed -n 's/^name *= *"\(.*\)"/\1/p' "$manifest" | head -1)"
@@ -84,7 +91,7 @@ step "装到 $dest"
 [ -x "$dest/trestle" ] && "$dest/trestle" stop >/dev/null 2>&1 || true
 sleep 1
 for b in trestled trestle trestle-mcp; do
-    install -m 0755 "target/release/$b" "$dest/$b"
+    install -m 0755 "$target_dir/release/$b" "$dest/$b"
 done
 note 'trestled, trestle, trestle-mcp'
 
