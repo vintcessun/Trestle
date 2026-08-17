@@ -94,20 +94,31 @@ Step "装到 $Dest"
 New-Item -ItemType Directory -Force -Path $Dest | Out-Null
 
 $exes = @('trestled.exe', 'trestle.exe', 'trestle-mcp.exe')
+
+# 先请 daemon 自己退。
+#
+# ⚠️ 只能用 CLI 去说这句话。`trestle-mcp.exe stop` 不是「停止」——它会起一个
+# MCP server 然后**等 stdin**，于是脚本永远等下去。这个坑踩过一次。
+$cliPath = Join-Path $Dest 'trestle.exe'
+if (Test-Path $cliPath) {
+    & $cliPath stop 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 800
+}
+
 foreach ($e in $exes) {
     $src = Join-Path $repo "target\release\$e"
     if (-not (Test-Path $src)) { throw "没找到 $src（先跑一次不带 -SkipBuild）" }
-    # daemon 可能正跑着，占着自己的文件。
     $dst = Join-Path $Dest $e
     try {
         Copy-Item $src $dst -Force
     } catch {
-        Warn "$e 正在被占用，先让 daemon 退出"
-        & $dst stop 2>&1 | Out-Null
-        Start-Sleep -Milliseconds 800
-        Get-Process -Name ($e -replace '\.exe$', '') -ErrorAction SilentlyContinue |
+        # 还占着 = 有进程在跑。trestle-mcp 由 Claude Code / Codex 的会话拉起，
+        # 它们不会自己退——只能杀。
+        $procName = $e -replace '\.exe$', ''
+        Warn "$e 被占用，结束 $procName 进程"
+        Get-Process -Name $procName -ErrorAction SilentlyContinue |
             Stop-Process -Force -ErrorAction SilentlyContinue
-        Start-Sleep -Milliseconds 400
+        Start-Sleep -Milliseconds 600
         Copy-Item $src $dst -Force
     }
 }
@@ -141,6 +152,17 @@ $tpl = Join-Path $repo 'plugins\templates'
 if (Test-Path $tpl) {
     Copy-Item $tpl (Join-Path $Dest 'plugins\templates') -Recurse -Force
     Note '插件脚手架模板'
+}
+
+# WIT 也要跟过来。
+#
+# 脚手架里写的是 `path: "../../../wit"`——相对 `plugins/tools/<name>/` 的位置。
+# 装出来的目录里没有 wit/ 的话，`trestle plugin new` 生成的插件根本编不了，
+# 而「遇到摩擦就现场长一个工具」正是这套东西的卖点。
+$wit = Join-Path $repo 'wit'
+if (Test-Path $wit) {
+    Copy-Item $wit (Join-Path $Dest 'wit') -Recurse -Force
+    Note 'WIT 接口定义（plugin new 生成的插件靠它编译）'
 }
 
 # ── 3. 配置 ──────────────────────────────────────────────────────────
@@ -264,6 +286,25 @@ if ($Register) {
         }
     }
 }
+
+# ── 6. PATH ──────────────────────────────────────────────────────────
+# 不加进 PATH 的话，`trestle` 只能靠全路径调用，CLI 基本等于不能用。
+#
+# 只改用户级 PATH，不碰系统级。写回去之前先看它在不在里面——重复装十次不该
+# 让 PATH 里多出十份。
+$userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+$entries = @($userPath -split ';' | Where-Object { $_ })
+if ($entries -notcontains $Dest) {
+    [Environment]::SetEnvironmentVariable('Path', (($entries + $Dest) -join ';'), 'User')
+    Step 'PATH'
+    Note "已把 $Dest 加进用户 PATH"
+    Note '当前这个终端还是旧的 PATH，新开一个才生效'
+} else {
+    Step 'PATH'
+    Note '已经在 PATH 里了'
+}
+# 当前进程也加上，后面的自检和提示能直接用 trestle
+if (($env:Path -split ';') -notcontains $Dest) { $env:Path = "$env:Path;$Dest" }
 
 Write-Host ''
 Step '装好了'

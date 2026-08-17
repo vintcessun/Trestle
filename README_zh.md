@@ -1,80 +1,79 @@
-[English](README.md) · **简体中文**
-
 # Trestle
 
-让 coding agent 操作远程服务器的运行时。
+[![CI](https://github.com/vintcessun/trestle/actions/workflows/ci.yml/badge.svg)](https://github.com/vintcessun/trestle/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Trestle 在本机跑一个常驻进程，把你的服务器以 MCP 工具的形式交给 Claude Code、
-Codex 或任何 MCP 客户端：跑命令、读写文件、机器之间搬数据、管长任务、抢显卡、
-打通端口。
+[[English](README.md)] [简体中文]
 
-```
+Trestle 是给 coding agent 用的基础设施运行时。它在本机跑一个常驻进程，把你的服务器
+以 MCP 工具的形式交给 Claude Code、Codex 或其他 MCP 客户端：跑命令、读写文件、
+机器之间搬数据、管长任务、分配显卡、打通端口。
+
+它有七个基本操作：read、write、edit、shell、upload、download、forward。
+其余一切，包括任务管理、跨机搬运、GPU 仲裁和 Web UI，都是建在这七个操作之上的
+WebAssembly 插件。
+
+```console
 $ trestle targets
 gpu-cluster
-  gpu-1   8 × GPU，只有走代理才可达
-  gpu-2     8 × GPU
-  gpu-3    8 × GPU
-  gpu-4    8 × GPU，盘最宽裕
+  gpu-1    alice@203.0.113.10:2201  /mnt/data/alice/work
+           8 x GPU。只有走代理才可达。
+  gpu-4    alice@203.0.113.31:2204  /home/alice/data
+           8 x GPU。盘最宽裕，跑新东西优先考虑这台。
 cloud
-  web-1    自有服务器（云厂商 A）
-  web-2  自有服务器
+  web-1    root@198.51.100.10:22  /root
+
+$ trestle exec gpu-4 "nvidia-smi --query-gpu=name --format=csv,noheader"
+$ trestle call job_start '{"target":"gpu-4","command":"python train.py","gpus":"auto:2"}'
 ```
-
-同样这些能力，agent 在会话里看到的是 31 个工具（`base_shell`、`job_start`、
-`gpu_acquire`、`xfer_between`…）。
-
-## 环境要求
-
-- Rust 1.90+，以及 `wasm32-wasip2` 目标：`rustup target add wasm32-wasip2`
-- Windows（安装脚本是 PowerShell；核心是跨平台的 Rust，但只在 Windows 11 上验证过）
-- 目标服务器上有 python 3.9+（远端 agent 只用标准库）
-- 可选：`uv tool install componentize-py`，只有要用 Python 写插件才需要
 
 ## 安装
 
-```powershell
-git clone <this repo> && cd Trestle
-copy config\trestle.example.toml config\trestle.toml
-copy config\secrets.example.toml config\secrets.toml
-# 编辑这两个文件：填你的机器和凭据
+需要 Rust 1.90 以上，以及 `wasm32-wasip2` 目标。目标服务器上要有 Python 3.9+。
 
-.\scripts\install.ps1 -Register
+```console
+$ rustup target add wasm32-wasip2
+
+# Windows
+$ .\scripts\install.ps1 -Register
+
+# Linux、macOS
+$ ./scripts/install.sh --register
 ```
 
-`install.ps1` 会编译（含把插件编到 wasm）、装成一个自包含目录 `dist\`、
-注册给 Claude Code 与 Codex。重开一个会话，工具就在了。
-
-常用参数：
+它会编译二进制与插件、装到 `dist/`、把 `trestle` 放进 `PATH`、并把 MCP server
+注册给 Claude Code 与 Codex。装完新开一个 shell 和一个 agent 会话。
 
 | 参数 | 作用 |
 |---|---|
-| `-Register` | 注册给 Claude Code 与 Codex |
-| `-Only claude` / `-Only codex` | 只注册其中一个 |
-| `-SkipBuild` | 不重新编译，只重新装配目录 |
-| `-Dest <路径>` | 装到别处（默认 `dist\`） |
-| `-Uninstall` | 注销并停掉 daemon（配置与凭据保留） |
+| `-Register` / `--register` | 注册给 Claude Code 与 Codex |
+| `-Only codex` / `--only codex` | 只注册其中一个 |
+| `-SkipBuild` / `--skip-build` | 不重新编译，只重新装配 |
+| `-Dest` / `--dest` | 装到 `dist/` 以外的地方 |
+| `-Uninstall` / `--uninstall` | 注销并停掉 daemon |
 
-装出来的目录是**自包含**的——三个可执行文件、配置、凭据、插件、状态全在一起。
-`trestle-mcp` 需要在自己旁边找到 `trestled`，所以不能把它们分散放。
-已存在的 `trestle.toml` / `secrets.toml` 不会被覆盖。
+三个二进制必须待在同一个目录：`trestle-mcp` 会在自己旁边找 `trestled`，配置、
+插件与状态也默认在同一处。已存在的 `trestle.toml` 与 `secrets.toml` 不会被覆盖。
+
+Windows、Linux、macOS 的预编译包在每个
+[release](https://github.com/vintcessun/trestle/releases) 里。
 
 ## 配置
 
-一个文件、一个入口：`trestle.toml`。凭据在同目录的 `secrets.toml`（已 gitignore）。
+`trestle.toml` 放机器与 connector；同目录的 `secrets.toml` 放凭据，已 gitignore。
+复制样例改成自己的。
 
 ```toml
-# 一组机器怎么进去
 [connectors.gpu-cluster]
-plugin = "ssh-socks5"              # 驱动：经 SOCKS5 代理的 SSH
+plugin = "ssh-socks5"                # 驱动：经 SOCKS5 代理的 SSH
 socks = "127.0.0.1:11080"
-allow_exec = ["docker"]            # 准它在本机跑哪些命令
+allow_exec = ["docker"]              # 准它在本机跑哪些命令
 
-[connectors.gpu-cluster.ready]  # 前置条件：探不通就把代理拉起来
+[connectors.gpu-cluster.ready]       # 可选：代理没起来就把它拉起来
 check = ["docker", "ps", "-a", "--filter", "name=^vpn-proxy$", "--format", "{{.Names}}"]
 check_expect = "vpn-proxy"
 start = ["docker", "start", "vpn-proxy"]
 
-# 一台机器
 [targets.gpu-4]
 connector = "gpu-cluster"
 host = "203.0.113.31"
@@ -82,152 +81,115 @@ port = 22
 user = "alice"
 workdir = "/home/alice/data"
 aliases = ["node-16"]
-note = "8 × GPU。盘最宽裕，跑新东西优先考虑这台。"
+note = "8 x GPU。盘最宽裕，跑新东西优先考虑这台。"
 ```
 
-`note` 会原样交给 agent，所以把「哪个盘满了」「东西该放哪」写进去——它比 agent 猜的准。
-机器叫什么名字由这里决定，驱动里不写死任何称呼。
-
-完整字段见 [config/trestle.example.toml](config/trestle.example.toml)。
+`note` 会原样交给 agent，适合写「哪个盘满了」「东西该放哪」这类信息。
+完整字段见 [`config/trestle.example.toml`](config/trestle.example.toml)。
 
 ## 使用
 
-agent 在会话里直接调工具。本机也可以用 CLI：
+agent 直接调工具。同样的操作 CLI 也有：
 
-```powershell
-trestle targets                     # 有哪些机器，秒回，不建连接
-trestle exec gpu-4 "nvidia-smi"       # 跑一条短命令
-trestle read gpu-4 /path/to/file
-trestle upload gpu-4 .\local /remote --sync
-trestle forward gpu-4 8080            # 端口映射，本地口由 host 分配
-trestle call job_start '{"target":"gpu-4","command":"python train.py","gpus":"auto:2"}'
-trestle agents                      # 谁在线、在干什么
-trestle doctor                      # 建链、量延迟、检查前置条件
+```console
+$ trestle targets                     # 有哪些机器，按 connector 分组
+$ trestle exec gpu-4 "nvidia-smi"
+$ trestle read gpu-4 /path/to/file
+$ trestle upload gpu-4 ./local /remote --sync
+$ trestle forward gpu-4 8080          # 本地端口由 host 分配
+$ trestle agents                      # 谁连着、在干什么
+$ trestle doctor                      # 建链、量延迟、打印 Web UI 地址
 ```
 
-Web UI 在 daemon 的 HTTP 端口上（`trestle doctor` 会打印地址）：机器状态、任务表、
-实时事件流、配置编辑页。
+daemon 按需自启，没有 `trestled start` 这一步。Web UI 在 daemon 的 HTTP 端口上，
+提供机器状态、任务表、实时事件流和配置编辑页。
+
+## 工具
+
+| 工具 | 用途 |
+|---|---|
+| `base_read` `base_write` `base_edit` `base_shell` | 文件与命令 |
+| `base_upload` `base_download` `base_forward` | 传输与端口映射 |
+| `job_start` `job_list` `job_logs` `job_wait` `job_stop` | 长任务 |
+| `fs_list` `fs_find` `fs_stat` `fs_tree` `fs_disk` | 远端文件系统 |
+| `gpu_status` `gpu_find` `gpu_acquire` `gpu_release` | GPU 仲裁 |
+| `fleet_status` `fleet_run` `targets_list` | 全队 |
+| `xfer_between` `xfer_distribute` | 机器之间 |
+| `monitor_open` | 实时输出的 WebSocket 端点 |
+| `agents_list` `notes_list` `note_put` | 多 agent 协同 |
+
+每个针对单机的工具都必须显式给 `target`，没有默认机。
 
 ## 工作原理
 
 ```
 Claude Code / Codex / CLI / 浏览器
-            │  MCP stdio · IPC · HTTP
-            ▼
-        trestled（常驻）
-            │  七个基本操作，按 target 路由
-            ▼
-     connector 插件（wasm）  →  SSH / 代理 / 长连接
-            ▼
+            |  MCP stdio、IPC、HTTP
+        trestled
+            |  七个基本操作，按 target 路由
+     connector 插件（wasm）  ->  SSH、代理、长连接
      远端 agent（python，常驻）
 ```
 
-**基本操作只有七个**：`read` / `write` / `edit` / `shell` / `upload` / `download` /
-`forward`。其余一切——任务管理、文件浏览、跨机搬运、全队概览、显卡仲裁、监视、
-Web UI——都是建在这七个操作之上的 WASM 插件。
+一个 connector 是一整条进入路径。它向上暴露一个名字和这七个操作，向下管连哪些
+机器、怎么连、断线重连、远端 agent 怎么部署。自带两个驱动：`ssh-socks5` 与
+`ssh-direct`，一个驱动可以支撑任意多个 connector。
 
-**connector 是一整块自包含的接入能力。** 它向上只暴露一个名字和这七个操作；
-向下自己管连哪些机器、怎么连、断了怎么重试、远端 agent 怎么部署。上层不知道
-下面是 SSH 还是别的。现在有两个驱动：`ssh-socks5`（经代理）和 `ssh-direct`（直连），
-同一个驱动可以配成任意多组机器。
+插件没有自己的 I/O。WebAssembly 组件没有 syscall，host 导入是它唯一的出口，
+而每个导入都会检查插件 manifest 里声明的 capability。
 
-**插件没有自己的 I/O。** wasm 组件没有 syscall，它唯一能碰到外界的地方是 host 导入，
-而每个导入的入口处都检查 capability。所以「这个插件能跑本机命令吗」是一个
-manifest 里能读出来的事实，不是一句约定。
+连接放在 daemon 里而不是每个 MCP 会话里，因为客户端每开一个会话就起一个 MCP 进程，
+而重建连接每台机器要花掉数秒。
 
-**状态在 daemon 里**，不在每个 MCP 会话里。Claude Code 每开一个会话就拉起一个
-MCP 进程；连接如果跟着会话走，每次都要重建（gpu-1 经 VPN 是数秒）。放在 daemon
-里之后连接真正只建一次，跨会话、跨 CLI 复用。
+这些取舍的来龙去脉在 [docs/01-architecture.md](docs/01-architecture.md)。
 
 ## 写一个插件
 
-```powershell
-trestle plugin new mytool --description "干什么的"
-# 改 plugins/tools/mytool/src/lib.rs 里的 list_tools 与 call
-.\scripts\build-plugins.ps1
-trestle plugin reload
+```console
+$ trestle plugin new mytool --description "干什么的"
+$ cd plugins/tools/mytool && cargo build --release --target wasm32-wasip2
+$ trestle plugin reload
 ```
 
-脚手架不改一个字就编译通过。`reload` 之后 Claude Code **不用重连**就能看到新工具。
-
-这是这个项目想成立的那条闭环：遇到一个没有工具的操作，生成脚手架、填十几行、
-reload，它就变成常驻工具了——下次不用再拼一遍命令。
-
-插件也可以用 Python 写（走 componentize-py，同一份 WIT），代价是组件从 150 KB
-变成 18 MB。
-
-## 性能
-
-一支真实机队实测（2026-08-17）：
-
-| | 稳态冷启动 | 热调用 | 断线自愈 |
-|---|---|---|---|
-| gpu-4 | 566ms | 36ms | 508ms |
-| gpu-1（经 VPN） | 2.4s | 55ms | 2.5s |
-| web-1 / web-2 | 1.0–1.2s | 26 / 116ms | ~1s |
-
-冷热差 36 倍。这就是状态放在 daemon 里的原因。
+脚手架不改一个字就能编译。`plugin reload` 之后 daemon 会推 `tools/list_changed`，
+客户端不用重连就能看到新工具。插件也可以用 Python 写（componentize-py），
+代价是组件体积大得多。
 
 ## 文档
 
 | 文档 | 内容 |
 |---|---|
-| [01-architecture.md](docs/01-architecture.md) | 全局图、四个设计支点、一次调用的完整数据流 |
-| [02-seven-operations.md](docs/02-seven-operations.md) | 七个基本操作，以及每一条为什么长这样 |
-| [03-connectors.md](docs/03-connectors.md) | connector 自包含什么、传输工具箱、远端 agent |
-| [04-plugins.md](docs/04-plugins.md) | 插件能看到什么、capability、实例池、接口兼容性 |
+| [01-architecture.md](docs/01-architecture.md) | 全局图与一次调用的完整数据流 |
+| [02-seven-operations.md](docs/02-seven-operations.md) | 七个基本操作及其语义 |
+| [03-connectors.md](docs/03-connectors.md) | connector、传输工具箱、远端 agent |
+| [04-plugins.md](docs/04-plugins.md) | capability、实例池、接口兼容性 |
 | [05-monitor-and-ui.md](docs/05-monitor-and-ui.md) | Monitor 的 ws 契约、事件模型、Web UI |
-| [06-multi-agent.md](docs/06-multi-agent.md) | 在场感知、会话级资源、留言板、资源单点仲裁 |
-| [07-fleet-lessons.md](docs/07-fleet-lessons.md) | 实测数据与六个坑（唯一从上一代继承的文档） |
-| [08-operating.md](docs/08-operating.md) | 安装、配置、接进 Claude Code 与 Codex、排查 |
-| [09-source-map.md](docs/09-source-map.md) | 每个文件干什么、里面有什么骨架 |
+| [06-multi-agent.md](docs/06-multi-agent.md) | 在场感知、会话级资源、资源仲裁 |
+| [07-fleet-lessons.md](docs/07-fleet-lessons.md) | 上一代的实测数据与踩过的坑 |
+| [08-operating.md](docs/08-operating.md) | 安装、配置、接进 agent、排查 |
+| [09-source-map.md](docs/09-source-map.md) | 每个文件干什么 |
 
-## 目录结构
+## 开发
 
-```
-crates/
-  trestle-core        类型、错误、统一配置
-  trestle-transport   TCP/SOCKS5 拨号、SSH、幂等部署、分块传输、端口转发
-  trestle-host        wasm 宿主：capability 强制、实例池、target → connector 路由
-  trestle-daemon      trestled：IPC、事件总线、协同层、ws、Web UI、状态持久化
-  trestle-mcp         MCP stdio 前端
-  trestle-cli         trestle 命令行
-agent-py/             远端 agent（常驻，只用标准库）
-plugins/
-  connectors/         ssh-socks5 · ssh-direct
-  lib/                connector-ready（两个驱动共用的前置条件状态机）
-  tools/              job · fs · gpu · fleet · xfer · monitor · hello-py
-  templates/rust/     trestle plugin new 的模板
-wit/trestle.wit       插件接口（connector 与 tool-plugin 两个世界）
+```console
+$ cargo test --workspace                 # 不需要真机
+$ python3 agent-py/test_agent.py         # 远端 agent 协议
+$ ./scripts/check-public.ps1             # 跟踪文件里没有个人基础设施信息
+
+$ TRESTLE_HOME=$PWD/config cargo test --workspace -- --ignored --test-threads=1
 ```
 
-## 技术栈
+连真实服务器的测试默认是 `#[ignore]`。
 
-| 层 | 选择 | 版本 |
-|---|---|---|
-| 插件运行时 | [`wasmtime`](https://crates.io/crates/wasmtime) + Component Model | 47.0.3 |
-| MCP 前端 | [`rmcp`](https://crates.io/crates/rmcp)（官方 Rust SDK） | 3.1.2 |
-| SSH | [`russh`](https://crates.io/crates/russh)（纯 Rust，async） | 0.62.6 |
-| 插件绑定 | `wit-bindgen` / `componentize-py` | 0.60 / 0.25 |
-| 异步 / HTTP / WS | `tokio` / `axum` / `tokio-tungstenite` | 1.53 / 0.8 / 0.30 |
+目录结构：
 
-## 测试
-
-```powershell
-cargo test --workspace                                # 不需要真机
-wsl python3 agent-py/test_agent.py                    # 远端 agent 协议，61 项
-$env:TRESTLE_HOME = "<repo>\config"
-cargo test --workspace -- --ignored --test-threads=1  # 真机验收
+```
+crates/         core、transport、host、daemon、mcp、cli
+agent-py/       远端 agent（常驻，只用标准库）
+plugins/        connectors/、lib/、tools/、templates/
+wit/            插件接口（connector 与 tool-plugin 两个世界）
 ```
 
-真调测试默认 `#[ignore]`，因为它们真的会连服务器、起进程、传文件。但它们才是有价值
-的那部分：上一代靠「逐个工具真调」在 53 个工具里抓到过 1 个 mock 测试永远抓不到的 bug。
+## 许可
 
-## 当前状态
-
-v0.1.0，个人项目。一支真实机队上跑通了七个基本操作、任务管理、跨机搬运、GPU 仲裁、
-多 agent 协同与 Web UI。已知限制：
-
-- 安装脚本只有 PowerShell 版，只在 Windows 11 上验证过
-- 插件用 WASI Preview 2（组件模型的 async 尚未采用，见 docs/04）
-- 没有发布到 crates.io，也还没有二进制发行版
+MIT。

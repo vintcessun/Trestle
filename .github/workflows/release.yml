@@ -102,6 +102,9 @@ jobs:
             cp "$dir/$name.wasm" "$out/plugins/$kind/$name/"
           done
           cp -r plugins/templates "$out/plugins/templates"
+          # 脚手架写的是 ../../../wit，所以 wit/ 必须跟着一起发，
+          # 否则 `trestle plugin new` 生成的插件在发布包里编不了。
+          cp -r wit "$out/wit"
 
           cp config/trestle.example.toml config/secrets.example.toml "$out/"
           cp README.md README_zh.md "$out/"

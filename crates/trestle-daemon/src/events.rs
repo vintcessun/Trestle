@@ -82,13 +82,48 @@ impl EventSink for PluginEventSink {
             _ => Level::Info,
         };
         let fields: serde_json::Value = serde_json::from_str(fields).unwrap_or_default();
+        let str_field = |key: &str| {
+            fields
+                .get(key)
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string()
+        };
+
+        // 按插件说的那个 kind 分派到对应的事件类型。
+        //
+        // 以前这里一律包成 `ToolCalled`，于是 ws 上什么都长得一样：插件加载、
+        // 被拒绝的调用、真正的工具调用，全是 `tool_called`。最要命的是
+        // `plugin_call_denied`——「拒绝必须能被看见」是权限模型的一条承诺，
+        // 而它在事件流上根本认不出来。
+        let kind = match kind {
+            "plugin_loaded" => EventKind::PluginLoaded {
+                plugin: if str_field("plugin").is_empty() {
+                    plugin.to_string()
+                } else {
+                    str_field("plugin")
+                },
+                world: str_field("kind"),
+            },
+            "plugin_call_denied" => EventKind::PluginCallDenied {
+                plugin: plugin.to_string(),
+                action: str_field("action"),
+            },
+            "plugin_call_failed" => EventKind::PluginCallFailed {
+                plugin: plugin.to_string(),
+                tool: str_field("tool"),
+                detail: str_field("detail"),
+            },
+            // 插件自定义的 kind 没有专门的变体，原样带着字段过去。
+            other => EventKind::ToolCalled {
+                tool: format!("{other} {fields}"),
+            },
+        };
         self.bus.publish(Event {
             at_ms: now_ms(),
             level,
             agent: AgentId(plugin.to_string()),
-            kind: EventKind::ToolCalled {
-                tool: format!("{kind} {fields}"),
-            },
+            kind,
         });
     }
 }
@@ -131,5 +166,54 @@ mod tests {
             kind: EventKind::AgentConnected { label: "x".into() },
         });
         assert_eq!(bus.subscriber_count(), 0);
+    }
+
+    /// 收集器：把总线上的事件序列化后收下来。
+    fn capture(plugin: &str, level: &str, kind: &str, fields: &str) -> serde_json::Value {
+        let bus = EventBus::new();
+        let mut rx = bus.subscribe();
+        PluginEventSink::new(bus).emit(plugin, level, kind, fields);
+        let e = rx.try_recv().expect("an event");
+        serde_json::to_value(&*e).expect("serialisable")
+    }
+
+    #[test]
+    fn a_denied_call_is_recognisable_on_the_event_stream() {
+        // 「被拒绝的调用必须能被看见」是 capability 模型的一条承诺。
+        // 以前它和普通工具调用一样是 `tool_called`，等于没被看见。
+        let e = capture(
+            "fs",
+            "warn",
+            "plugin_call_denied",
+            r#"{"plugin":"fs","action":"local-exec docker"}"#,
+        );
+        assert_eq!(e["type"], "plugin_call_denied");
+        assert_eq!(e["action"], "local-exec docker");
+    }
+
+    #[test]
+    fn loading_a_plugin_says_so_by_name() {
+        let e = capture(
+            "gpu-cluster",
+            "info",
+            "plugin_loaded",
+            r#"{"plugin":"ssh-socks5","kind":"connector"}"#,
+        );
+        assert_eq!(e["type"], "plugin_loaded");
+        // 驱动名在 plugin 字段里，实例名在 agent 字段里——两个都要留住。
+        assert_eq!(e["plugin"], "ssh-socks5");
+        assert_eq!(e["agent"], "gpu-cluster");
+    }
+
+    #[test]
+    fn an_unknown_kind_still_carries_its_fields() {
+        // 插件可以发自己定义的事件；那些没有专门的变体，但不能把内容丢掉。
+        let e = capture("job", "info", "job_started", r#"{"job_id":"train-1"}"#);
+        assert_eq!(e["type"], "tool_called");
+        assert!(
+            e["tool"].as_str().unwrap().contains("train-1"),
+            "{}",
+            e["tool"]
+        );
     }
 }

@@ -626,13 +626,28 @@ fn scaffold(
         );
     }
 
-    let repo = root.parent().unwrap_or(root);
-    let templates = repo.join("plugins").join("templates").join("rust");
+    // 生成到**插件真正住的地方**，也就是 reload 会去扫的那个目录。
+    //
+    // 装出来的目录里 plugins/ 就在 home 底下；开发时 home 是 `<repo>/config`，
+    // 插件在仓库根的 plugins/ 下。之前这里一律取 `root.parent()`，在开发树里
+    // 碰巧对——但装到 `C:\Tools\Trestle` 之后就会生成到 `C:\Tools\plugins\`，
+    // 而 reload 永远扫不到那里。
+    let installed = root.join("plugins");
+    let base = if installed.join("templates").join("rust").exists() {
+        installed
+    } else {
+        root.parent().unwrap_or(root).join("plugins")
+    };
+    let templates = base.join("templates").join("rust");
     if !templates.exists() {
-        anyhow::bail!("cannot find the plugin template at {}", templates.display());
+        anyhow::bail!(
+            "cannot find the plugin template at {}\n\
+             (an installed tree keeps it at <install-dir>/plugins/templates/rust)",
+            templates.display()
+        );
     }
 
-    let dir = repo.join("plugins").join("tools").join(name);
+    let dir = base.join("tools").join(name);
     if dir.exists() {
         anyhow::bail!("{} already exists", dir.display());
     }
