@@ -60,11 +60,22 @@ jobs:
           rustc -V
           cargo -V
 
-      # 缓存拿不到不该让整个 job 失败——它只是让编译慢一点。
-      - uses: Swatinem/rust-cache@v2
-        continue-on-error: true
+      # 缓存用官方的 actions/cache，不用第三方 action。
+      #
+      # 所有被引用的 action 都是在 "Set up job" 阶段下载的，也就是在任何一个
+      # step 跑起来之前 —— 所以 `continue-on-error` 救不了它：那管的是 step 的
+      # 执行结果，不是 action 的下载。GitHub 一抖，第三方 action 就 429，整个
+      # job 死在 setup 里。实际连着两次就是这么挂的。
+      # 官方 action 命中率高得多，而且这个仓库本来也只需要它。
+      - uses: actions/cache@v4
         with:
-          key: ${{ matrix.os }}
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-${{ matrix.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-${{ matrix.os }}-
 
       # 插件是测试的输入，不是产物：host 装不上插件就起不来，测试也就跑不了。
       - name: 编插件到 wasm

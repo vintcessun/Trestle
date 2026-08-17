@@ -59,10 +59,16 @@ jobs:
           rustup target add wasm32-wasip2
           rustc -V
 
-      - uses: Swatinem/rust-cache@v2
-        continue-on-error: true
+      # 官方 cache。第三方 action 在 GitHub 抖动时会让 job 死在 "Set up job"，
+      # 那是任何 step 都还没跑的阶段，continue-on-error 管不着。
+      - uses: actions/cache@v4
         with:
-          key: release-${{ matrix.target }}
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-${{ matrix.target }}-
 
       - name: 编三个二进制
         shell: bash
@@ -178,16 +184,25 @@ jobs:
       - name: 看一眼收到了什么
         run: ls -la artifacts
 
-      - uses: softprops/action-gh-release@v2
-        with:
-          files: artifacts/*
-          generate_release_notes: true
-          body: |
-            每个包都是**自包含**的：三个二进制、全部插件、样例配置。
-            解压之后照着 `GETTING-STARTED.txt` 走。
+      # 用 runner 自带的 gh，不引第三方 action —— action 是在 "Set up job"
+      # 阶段下载的，GitHub 一抖就把整个 job 带走。gh 已经装在镜像里了。
+      - name: 建 release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cat > notes.md <<'NOTES'
+          每个包都是**自包含**的：三个二进制、全部插件、样例配置、WIT。
+          解压之后照着 `GETTING-STARTED.txt` 走。
 
-            Windows 上也可以直接跑 `install.ps1 -Register`，它会把目录装好
-            并注册给 Claude Code 与 Codex。
+          Windows 上也可以直接跑 `install.ps1 -Register`，Linux / macOS 跑
+          `install.sh --register`：装好目录、放进 PATH、注册给 Claude Code 与 Codex。
 
-            > Windows 与 Linux 都跑过完整的离线测试套件；连真实服务器的那部分
-            > 只在 Windows 上验证过。macOS 的包由 CI 构建并跑离线测试，没有手工验证。
+          > Windows 与 Linux 都跑过完整的离线测试套件；连真实服务器的那部分
+          > 只在 Windows 上验证过。macOS 的包由 CI 构建并跑离线测试，没有手工验证。
+          NOTES
+          gh release create "$GITHUB_REF_NAME" artifacts/* \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file notes.md \
+            --generate-notes
