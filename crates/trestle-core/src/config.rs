@@ -273,6 +273,9 @@ pub struct ConfigStore {
     secrets: Secrets,
     /// 真配置不在，用的是样例。调用方该说一声——样例里的机器连不上。
     from_example: bool,
+    /// 显式指定的插件目录。测试用它，好过去改进程全局的环境变量
+    /// （同一个测试二进制里的别的测试会跟着一起变）。
+    plugins_override: Option<PathBuf>,
 }
 
 impl ConfigStore {
@@ -317,7 +320,14 @@ impl ConfigStore {
             config,
             secrets,
             from_example,
+            plugins_override: None,
         })
+    }
+
+    /// 换一个插件目录。
+    pub fn with_plugins_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.plugins_override = Some(dir.into());
+        self
     }
 
     /// 现在跑的是样例配置吗。
@@ -360,6 +370,9 @@ impl ConfigStore {
     /// 每个测试用自己的 home（否则并行跑的时候会互相踩 daemon.json），
     /// 但插件仍然指向仓库里那一份，不必复制一遍。
     pub fn plugins_dir(&self) -> PathBuf {
+        if let Some(dir) = &self.plugins_override {
+            return dir.clone();
+        }
         if let Ok(dir) = std::env::var("TRESTLE_PLUGINS")
             && !dir.trim().is_empty()
         {
@@ -489,6 +502,7 @@ mod tests {
             config,
             secrets: Secrets::default(),
             from_example: false,
+            plugins_override: None,
         };
         let err = store.targets().unwrap_err();
         let msg = err.to_string();

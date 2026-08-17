@@ -112,10 +112,19 @@ impl TrestleHost {
         let tools = &self.tools;
 
         for dir in tool_dirs(store) {
-            let loaded = runtime.load_tool(&dir).map_err(|e| TrestleError::Config {
-                path: dir.display().to_string(),
-                detail: format!("{e:#}"),
-            })?;
+            // 一个装不上的插件**不能**把整个 daemon 拖住。
+            //
+            // 最常见的成因是它和当前 host 的接口对不上（多半是拿新 WIT 编的，
+            // 而 host 还是旧的）。那种情况下最糟的处理方式恰恰是「谁都别想启动」——
+            // 你会连 `trestle plugin list` 都跑不了，也就无从知道是哪一个坏了。
+            // 所以：跳过它、说清楚、继续装别的。
+            let loaded = match runtime.load_tool(&dir) {
+                Ok(l) => l,
+                Err(e) => {
+                    self.note_broken(&dir, &format!("{e:#}")).await;
+                    continue;
+                }
+            };
             let name = loaded.manifest.name.clone();
             let config_json = store
                 .plugin_section(&name)
@@ -151,18 +160,29 @@ impl TrestleHost {
                 )
             });
 
-            let pool = runtime
-                .tool_pool(loaded, make_state, self.policy)
-                .await
-                .map_err(|e| TrestleError::Config {
-                    path: dir.display().to_string(),
-                    detail: format!("{e:#}"),
-                })?;
-            let pool = Arc::new(pool);
+            // 实例化失败同理：接口对不上就是在这一步现形的。
+            let pool = match runtime.tool_pool(loaded, make_state, self.policy).await {
+                Ok(p) => Arc::new(p),
+                Err(e) => {
+                    self.note_broken(&dir, &format!("{e:#}")).await;
+                    continue;
+                }
+            };
 
             // 声明与实例化分离：`list-tools` 读一次就进注册表，工具因此立刻可见。
-            let raw = pool.any().list_tools().await?;
-            let descriptors = parse_descriptors(&name, &raw)?;
+            let descriptors = match pool.any().list_tools().await {
+                Ok(raw) => match parse_descriptors(&name, &raw) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        self.note_broken(&dir, &e.to_string()).await;
+                        continue;
+                    }
+                },
+                Err(e) => {
+                    self.note_broken(&dir, &e.to_string()).await;
+                    continue;
+                }
+            };
             tools
                 .register(LoadedTool {
                     manifest,
@@ -172,6 +192,36 @@ impl TrestleHost {
                 .await?;
         }
         Ok(())
+    }
+
+    /// 记下一个装不上的插件：日志、事件、注册表各留一份。
+    ///
+    /// 三处都留是刻意的。日志给正在看终端的人；事件给 Web UI 与别的 agent；
+    /// 注册表给 `trestle plugin list`——**坏掉的插件必须出现在插件清单里**，
+    /// 否则它就只是「不见了」，而「不见了」是最难查的一种故障。
+    async fn note_broken(&self, dir: &std::path::Path, detail: &str) {
+        let name = dir
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| dir.display().to_string());
+        let remedy = if detail.contains("not found in the linker") {
+            "这个插件要的接口当前 host 没有——多半是它比 host 新。\
+             重新编一次（scripts/build-plugins.ps1），或者升级 Trestle。"
+        } else {
+            "看 detail；改完跑 trestle plugin reload，不必重启 daemon。"
+        };
+        tracing::warn!(plugin = %name, %detail, "skipping a plugin that will not load");
+        self.events.emit(
+            &name,
+            "warn",
+            "plugin_load_failed",
+            &serde_json::json!({
+                "plugin": name, "path": dir.display().to_string(),
+                "detail": detail, "remedy": remedy,
+            })
+            .to_string(),
+        );
+        self.tools.note_failure(&name, detail, remedy).await;
     }
 
     /// 七个基本操作，按 target 路由。

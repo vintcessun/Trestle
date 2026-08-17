@@ -735,3 +735,76 @@ async fn hitting_several_machines_happens_concurrently() {
         lab.len()
     );
 }
+
+#[tokio::test]
+async fn one_broken_plugin_does_not_take_the_others_down_with_it() {
+    // 一个装不上的插件最常见的成因是它和当前 host 的接口对不上。那种情况下
+    // 最糟的处理方式恰恰是「谁都别想启动」——你会连 `plugin list` 都跑不了，
+    // 也就无从知道是哪一个坏了。所以它必须被跳过，而且必须**出现在清单里**。
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let tmp = std::env::temp_dir().join("trestle-broken-plugin-test");
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(tmp.join("tools/wreck")).unwrap();
+
+    // 一个好的：整个目录照搬。
+    let good = tmp.join("tools/fs");
+    std::fs::create_dir_all(&good).unwrap();
+    std::fs::copy(
+        repo.join("plugins/tools/fs/manifest.toml"),
+        good.join("manifest.toml"),
+    )
+    .unwrap();
+    std::fs::copy(repo.join("plugins/tools/fs/fs.wasm"), good.join("fs.wasm"))
+        .expect("run scripts/build-plugins.ps1 first");
+
+    // 一个坏的：有 manifest，没有 .wasm。装不上的一种。
+    std::fs::write(
+        tmp.join("tools/wreck/manifest.toml"),
+        "name = \"wreck\"\nkind = \"tool\"\n",
+    )
+    .unwrap();
+
+    let root = std::env::var("TRESTLE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| repo.join("config"));
+    let store = Arc::new(
+        ConfigStore::load(root)
+            .expect("config")
+            .with_plugins_dir(&tmp),
+    );
+    let h = TrestleHost::start(store, HostOptions::default())
+        .await
+        .expect("the host must come up even with a broken plugin in the tree");
+
+    // 好的那个照常工作。
+    let names: Vec<String> = h
+        .tool_descriptors()
+        .await
+        .into_iter()
+        .map(|d| d.name)
+        .collect();
+    assert!(names.contains(&"fs_list".to_string()), "{names:?}");
+
+    // 坏的那个出现在清单里，带着原因和下一步——不是「不见了」。
+    let inventory = h.tools.inventory().await;
+    let wreck = inventory
+        .iter()
+        .find(|p| p["name"] == "wreck")
+        .expect("the broken plugin must still be listed");
+    assert_eq!(wreck["ok"], false);
+    assert!(
+        !wreck["detail"].as_str().unwrap_or("").is_empty(),
+        "{wreck}"
+    );
+    assert!(
+        !wreck["remedy"].as_str().unwrap_or("").is_empty(),
+        "{wreck}"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}

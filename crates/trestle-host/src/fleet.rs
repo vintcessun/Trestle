@@ -16,6 +16,8 @@ pub struct Fleet {
     store: Arc<ConfigStore>,
     pools: BTreeMap<String, Arc<ConnectorPool>>,
     registry: TargetRegistry,
+    /// 装不上的 connector：名字 → 原因。它们的机器因此不可达，但别的照常。
+    broken: BTreeMap<String, String>,
 }
 
 impl Fleet {
@@ -31,18 +33,24 @@ impl Fleet {
     ) -> Result<Self> {
         let registry = store.targets()?;
         let mut pools = BTreeMap::new();
+        let mut broken: BTreeMap<String, String> = BTreeMap::new();
 
         for (name, cfg) in &store.config().connectors {
             if !cfg.enabled {
                 continue;
             }
             let dir = plugin_dir(&store, "connectors", &cfg.plugin);
-            let mut loaded = runtime
-                .load_connector(&dir)
-                .map_err(|e| TrestleError::Config {
-                    path: format!("connectors.{name}"),
-                    detail: format!("{e:#}"),
-                })?;
+            // 一个装不上的驱动只该让**它那一组机器**不可用，不该让 daemon 起不来。
+            // 别组的机器和别的插件与它无关，凭什么陪葬。
+            let mut loaded = match runtime.load_connector(&dir) {
+                Ok(l) => l,
+                Err(e) => {
+                    tracing::warn!(connector = %name, driver = %cfg.plugin,
+                        error = %format!("{e:#}"), "skipping a connector that will not load");
+                    broken.insert(name.clone(), format!("{e:#}"));
+                    continue;
+                }
+            };
 
             // 配置里的 `allow_exec` 并进 manifest 的白名单。
             //
@@ -63,13 +71,18 @@ impl Fleet {
                 .collect();
             let config_json = serde_json::to_string(&cfg.settings).unwrap_or_else(|_| "{}".into());
 
-            let pool = runtime
+            let pool = match runtime
                 .connector_pool(Arc::new(loaded), name.clone(), mine, config_json, policy)
                 .await
-                .map_err(|e| TrestleError::Config {
-                    path: format!("connectors.{name}"),
-                    detail: format!("{e:#}"),
-                })?;
+            {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(connector = %name, driver = %cfg.plugin,
+                        error = %format!("{e:#}"), "skipping a connector that will not instantiate");
+                    broken.insert(name.clone(), format!("{e:#}"));
+                    continue;
+                }
+            };
             pools.insert(name.clone(), Arc::new(pool));
         }
 
@@ -77,6 +90,7 @@ impl Fleet {
             store,
             pools,
             registry,
+            broken,
         })
     }
 
@@ -98,13 +112,28 @@ impl Fleet {
     }
 
     pub fn pool(&self, connector: &str) -> Result<Arc<ConnectorPool>> {
-        self.pools
-            .get(connector)
-            .cloned()
-            .ok_or_else(|| TrestleError::UnknownConnector {
-                name: connector.to_string(),
-                known: self.connector_names(),
-            })
+        if let Some(pool) = self.pools.get(connector) {
+            return Ok(Arc::clone(pool));
+        }
+        // 装不上和压根没配是两回事。「未知的 connector」会让人去翻配置，
+        // 而真正该做的是重编那个驱动。
+        if let Some(why) = self.broken.get(connector) {
+            return Err(TrestleError::ConnectorNotReady {
+                connector: connector.to_string(),
+                detail: format!("this connector's driver did not load: {why}"),
+                remedy: "重新编一次插件（scripts/build-plugins.ps1），然后 trestle plugin reload"
+                    .into(),
+            });
+        }
+        Err(TrestleError::UnknownConnector {
+            name: connector.to_string(),
+            known: self.connector_names(),
+        })
+    }
+
+    /// 装不上的 connector。`trestle doctor` 用它。
+    pub fn broken(&self) -> &BTreeMap<String, String> {
+        &self.broken
     }
 
     /// 把一个操作路由到 target 所属的 connector。

@@ -34,11 +34,23 @@ pub struct LoadedTool {
     pub pool: Arc<ToolPool>,
 }
 
+/// 一个装不上的插件。
+///
+/// 它必须出现在插件清单里而不是悄悄消失——「不见了」是最难查的一种故障。
+#[derive(Debug, Clone, Serialize)]
+pub struct BrokenPlugin {
+    pub name: String,
+    pub detail: String,
+    pub remedy: String,
+}
+
 #[derive(Default)]
 pub struct ToolRegistry {
     /// 工具名 → 插件名。工具名全局唯一。
     index: Mutex<BTreeMap<String, String>>,
     plugins: Mutex<BTreeMap<String, Arc<LoadedTool>>>,
+    /// 装不上的那些。
+    broken: Mutex<BTreeMap<String, BrokenPlugin>>,
 }
 
 impl ToolRegistry {
@@ -62,6 +74,22 @@ impl ToolRegistry {
         }
         self.plugins.lock().await.insert(plugin, Arc::new(loaded));
         Ok(())
+    }
+
+    /// 记下一个装不上的插件。
+    pub async fn note_failure(&self, name: &str, detail: &str, remedy: &str) {
+        self.broken.lock().await.insert(
+            name.to_string(),
+            BrokenPlugin {
+                name: name.to_string(),
+                detail: detail.to_string(),
+                remedy: remedy.to_string(),
+            },
+        );
+    }
+
+    pub async fn broken(&self) -> Vec<BrokenPlugin> {
+        self.broken.lock().await.values().cloned().collect()
     }
 
     /// 全部工具的声明。MCP 的 `tools/list` 用它。
@@ -114,8 +142,11 @@ impl ToolRegistry {
     }
 
     /// 每个插件贡献了哪些工具。`plugin list` 与 Web UI 用它。
+    ///
+    /// **装不上的也在里面**，带着原因和下一步——不然它就只是「不见了」。
     pub async fn inventory(&self) -> Vec<serde_json::Value> {
-        self.plugins
+        let mut out: Vec<serde_json::Value> = self
+            .plugins
             .lock()
             .await
             .values()
@@ -126,15 +157,28 @@ impl ToolRegistry {
                     "description": p.manifest.description,
                     "tools": p.tools.iter().map(|t| t.name.clone()).collect::<Vec<_>>(),
                     "capabilities": p.manifest.capabilities,
+                    "ok": true,
                 })
             })
-            .collect()
+            .collect();
+        for b in self.broken.lock().await.values() {
+            out.push(serde_json::json!({
+                "name": b.name,
+                "ok": false,
+                "tools": Vec::<String>::new(),
+                "detail": b.detail,
+                "remedy": b.remedy,
+            }));
+        }
+        out
     }
 
     /// 清空。热加载时先清再重新注册——否则删掉的插件会留在工具面里。
     pub async fn clear(&self) {
         self.index.lock().await.clear();
         self.plugins.lock().await.clear();
+        // 坏掉的记录也要清：修好之后 reload 一次就该干净，否则那条警告会永远挂着。
+        self.broken.lock().await.clear();
     }
 }
 

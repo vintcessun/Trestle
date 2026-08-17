@@ -402,6 +402,16 @@ async fn run(cli: Cli) -> anyhow::Result<std::process::ExitCode> {
             let plugins = client.call(RequestBody::Plugins).await?;
             for p in plugins.as_array().cloned().unwrap_or_default() {
                 let tools = p["tools"].as_array().cloned().unwrap_or_default();
+                // 装不上的插件也在清单里，而且要显眼。它「不见了」才是最难查的。
+                if p["ok"] == false {
+                    println!(
+                        "\x1b[31m✗ {}\x1b[0m  装不上",
+                        p["name"].as_str().unwrap_or("")
+                    );
+                    println!("  原因  {}", p["detail"].as_str().unwrap_or(""));
+                    println!("  怎么办 {}", p["remedy"].as_str().unwrap_or(""));
+                    continue;
+                }
                 println!(
                     "\x1b[1m{}\x1b[0m {}  {}",
                     p["name"].as_str().unwrap_or(""),
