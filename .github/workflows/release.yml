@@ -18,6 +18,7 @@ jobs:
   build:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -44,13 +45,22 @@ jobs:
             archive: tar
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}, wasm32-wasip2
+      # 用 runner 自带的 rustup，不额外拉 action —— 拉 action 走
+      # codeload.github.com，GitHub 一抖就 429，而且是死在 "Set up job"，
+      # 连自己的第一条命令都跑不到。rustup 走 static.rust-lang.org。
+      - name: Rust 工具链
+        shell: bash
+        run: |
+          set -euxo pipefail
+          rustup default stable
+          rustup target add ${{ matrix.target }}
+          rustup target add wasm32-wasip2
+          rustc -V
 
       - uses: Swatinem/rust-cache@v2
+        continue-on-error: true
         with:
           key: release-${{ matrix.target }}
 
@@ -156,6 +166,7 @@ jobs:
     needs: build
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: write
     steps:

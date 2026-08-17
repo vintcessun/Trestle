@@ -17,38 +17,52 @@ jobs:
   hygiene:
     name: 卫生检查
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
-
-      # 这个仓库将来要公开，而个人基础设施信息已经漏进来过两次。
+      # 这个仓库是公开的，而个人基础设施信息已经漏进来过三次。
       - name: 有没有个人信息混进来
         shell: pwsh
         run: ./scripts/check-public.ps1
 
       - name: 格式
-        run: cargo fmt --all -- --check
+        shell: bash
+        run: |
+          rustup component add rustfmt
+          cargo fmt --all -- --check
 
   test:
     name: 测试 (${{ matrix.os }})
     needs: hygiene
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-          targets: wasm32-wasip2
+      # 用 runner 自带的 rustup，不额外拉一个 action。
+      #
+      # 拉 action 是从 codeload.github.com 下载的，GitHub 一抖就是 429，
+      # 而且它挂在 "Set up job" 阶段——失败时你连自己的第一条命令都没跑到。
+      # 实际发生过：一次 Actions 故障期间 macOS 与 Windows 同时死在这里。
+      # rustup 走 static.rust-lang.org，和 GitHub 的死活无关。
+      - name: Rust 工具链
+        shell: bash
+        run: |
+          set -euxo pipefail
+          rustup default stable
+          rustup component add clippy
+          rustup target add wasm32-wasip2
+          rustc -V
+          cargo -V
 
+      # 缓存拿不到不该让整个 job 失败——它只是让编译慢一点。
       - uses: Swatinem/rust-cache@v2
+        continue-on-error: true
         with:
           key: ${{ matrix.os }}
 
@@ -57,7 +71,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for manifest in $(find plugins -name manifest.toml -not -path '*/templates/*'); do
+          find plugins -name manifest.toml -not -path '*/templates/*' | while read -r manifest; do
             dir=$(dirname "$manifest")
             name=$(sed -n 's/^name *= *"\(.*\)"/\1/p' "$manifest" | head -1)
             # Python 插件要 componentize-py，CI 上不装——它不参与这里的断言。
