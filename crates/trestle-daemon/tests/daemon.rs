@@ -84,7 +84,8 @@ impl Running {
         let _ = std::fs::remove_file(home.join("daemon.json"));
 
         // clippy 会提醒「spawn 之后不是每条路径都 wait」——这里是有意的：
-        // 这个 daemon 由 Running::drop 统一 kill + wait，而 Running 活到进程结束。
+        // 这个 daemon 的收场靠的是 idle 超时（见 Running 的 Drop 上那段注释），
+        // 不是靠某条路径去 wait 它。
         #[allow(clippy::zombie_processes)]
         let child = std::process::Command::new(daemon_exe())
             .arg("--home")
@@ -126,6 +127,13 @@ impl Running {
     }
 }
 
+/// ⚠️ **这个 Drop 实际上不会跑。**
+///
+/// `Running` 存在一个 `static OnceCell` 里，而 Rust 在进程退出时不 drop static。
+/// 真正让测试起的 daemon 退场的是上面把 `idle_timeout_secs` 改成 90 秒那一手——
+/// 测试结束后没人连着，它自己就走了。
+///
+/// 留着这个实现是为了万一有人改成非 static 的用法；但别指望它。
 impl Drop for Running {
     fn drop(&mut self) {
         let _ = self.child.kill();
