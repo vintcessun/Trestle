@@ -39,16 +39,18 @@ $rules = @(
        Pattern = 'xmu|XMU|厦[大门]|securelink|SecureLink|edu\.cn'
        Why = '会把这套基础设施指认到具体单位' }
 
+    # ⚠️ 这份文件里**必须**出现这些模式，否则它就什么都查不出来。
+    #    所以任何脱敏脚本都要把它排除掉——它已经被自己的脱敏脚本改坏过一次。
     @{ Name = '硬件清单'
-       Pattern = 'GPU|A800|H100|H800|SXM4|\d+\s*[Gg]\s*[x×]\s*\d'
-       Why = '具体型号与规模是资产披露。示例写「8 × GPU」就够了' }
+       Pattern = 'A100|A800|H100|H800|SXM4|V100|RTX\s*\d'
+       Why = '具体型号与规模是资产披露。示例写「8 x GPU」就够了' }
 
     @{ Name = '个人本机路径'
        Pattern = '[A-Z]:\\(Scripts|Users)\\[A-Za-z0-9_]+\\'
        Why = '示例请用 <repo> 或相对路径' }
 
     @{ Name = '真实机队规模'
-       Pattern = '[六七八]台真机|整支机队'
+       Pattern = '[六七八九]台真机'
        Why = '机队规模也是资产信息' }
 )
 
