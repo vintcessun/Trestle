@@ -9,13 +9,8 @@ use std::sync::Arc;
 use trestle_core::config::ConfigStore;
 use trestle_core::{Result, TargetRegistry, TrestleError};
 
+use crate::pool::PoolPolicy;
 use crate::runtime::{ConnectorPool, Runtime};
-
-/// 每个 connector 起几个实例。
-///
-/// 一个 wasm 实例被调用期间是独占的，所以这个数字就是「同一组机器能几路并发」。
-/// 4 够覆盖常见的全队操作，又不至于让实例本身占太多内存（一个实例几百 KB）。
-pub const DEFAULT_POOL_SIZE: usize = 4;
 
 pub struct Fleet {
     store: Arc<ConfigStore>,
@@ -25,14 +20,14 @@ pub struct Fleet {
 
 impl Fleet {
     /// 扫描 `plugins/connectors/`，把配置里启用的 connector 都加载起来。
-    pub async fn load(runtime: &Runtime, store: Arc<ConfigStore>) -> Result<Self> {
-        Self::load_with_pool_size(runtime, store, DEFAULT_POOL_SIZE).await
-    }
-
-    pub async fn load_with_pool_size(
-        runtime: &Runtime,
+    ///
+    /// 一个 connector **配置节**是一个实例：`[connectors.gpu-cluster]` 说了
+    /// `plugin = "ssh-socks5"`，那它就是 `ssh-socks5` 这个驱动的一个实例。
+    /// 同一个驱动可以被配置成任意多个 connector，各管各的机器、各有各的 KV。
+    pub async fn load(
+        runtime: &Arc<Runtime>,
         store: Arc<ConfigStore>,
-        pool_size: usize,
+        policy: PoolPolicy,
     ) -> Result<Self> {
         let registry = store.targets()?;
         let mut pools = BTreeMap::new();
@@ -42,12 +37,24 @@ impl Fleet {
                 continue;
             }
             let dir = plugin_dir(&store, "connectors", &cfg.plugin);
-            let loaded = runtime
+            let mut loaded = runtime
                 .load_connector(&dir)
                 .map_err(|e| TrestleError::Config {
                     path: format!("connectors.{name}"),
                     detail: format!("{e:#}"),
                 })?;
+
+            // 配置里的 `allow_exec` 并进 manifest 的白名单。
+            //
+            // 一个通用驱动（`ssh-socks5`）没法在自己的 manifest 里知道你会用
+            // docker 还是 wg-quick 把代理拉起来，所以那份授权只能由**你**给。
+            // manifest 里那份是插件作者说「我需要什么」，配置里这份是你说
+            // 「我准你跑什么」——取并集，因为配置是你写的。
+            for prog in &cfg.allow_exec {
+                if !loaded.manifest.capabilities.local_exec.contains(prog) {
+                    loaded.manifest.capabilities.local_exec.push(prog.clone());
+                }
+            }
 
             let mine: Vec<_> = registry
                 .iter()
@@ -57,7 +64,7 @@ impl Fleet {
             let config_json = serde_json::to_string(&cfg.settings).unwrap_or_else(|_| "{}".into());
 
             let pool = runtime
-                .instantiate_pool(&loaded, mine, config_json, pool_size)
+                .connector_pool(Arc::new(loaded), name.clone(), mine, config_json, policy)
                 .await
                 .map_err(|e| TrestleError::Config {
                     path: format!("connectors.{name}"),
@@ -71,6 +78,11 @@ impl Fleet {
             pools,
             registry,
         })
+    }
+
+    /// 巡检所有 connector 的实例池，把闲太久的实例还回去。返回收了几个。
+    pub fn sweep_pools(&self) -> usize {
+        self.pools.values().map(|p| p.sweep()).sum()
     }
 
     pub fn targets(&self) -> &TargetRegistry {
@@ -100,7 +112,7 @@ impl Fleet {
         let t = self.registry.resolve(target)?;
         let pool = self.pool(&t.connector)?;
         // 用解析后的**主名**调插件：插件只认主名，别名是 host 这一层的事。
-        pool.pick().op(&t.name, op, payload).await
+        pool.pick().await.op(&t.name, op, payload).await
     }
 
     /// 对多台机器并发执行同一个操作。
@@ -157,14 +169,14 @@ fn plugin_dir(store: &ConfigStore, kind: &str, name: &str) -> std::path::PathBuf
 mod tests {
     use super::*;
 
-    /// 这个常量就是「同一组机器能几路并发」，改它会直接改 fleet_status 的墙钟时间。
-    /// 编译期就挡住 1 —— 池子只有一个实例等于没有并发。
-    const _POOL_MUST_ALLOW_CONCURRENCY: () = assert!(DEFAULT_POOL_SIZE >= 2);
-
     #[test]
-    fn the_pool_size_is_the_concurrency_of_a_connector() {
-        // 上面那个 const 断言已经在编译期挡住了「池子只有一个」；
-        // 这条只是把当前值钉住，改动时会有人看见。
-        assert_eq!(DEFAULT_POOL_SIZE, 4);
+    fn a_connector_can_always_grow_to_at_least_two_instances() {
+        // 池的上限就是「同一组机器能几路并发」。上限为 1 的机器等于没有并发，
+        // fleet_status 会退化成整支机队排队——这条守着默认值不掉到那里去。
+        assert!(
+            PoolPolicy::default().max >= 2,
+            "default pool ceiling is {}",
+            PoolPolicy::default().max
+        );
     }
 }

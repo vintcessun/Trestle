@@ -1,0 +1,24 @@
+# 这个插件不属于主 workspace —— 它编到 wasm32-wasip2，和 host 的 target 不同。
+[workspace]
+
+[package]
+name = "ssh-direct"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.60"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# 和 ssh-socks5 共用的前置条件状态机。直连通常不需要前置条件，但「先把 VPN
+# 拨上再连」这种场景是存在的，所以这条路对它同样开着。
+connector-ready = { path = "../../lib/connector-ready" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

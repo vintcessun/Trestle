@@ -130,7 +130,7 @@ ps -eo cmd | grep -c '[s]eq 1 20'
 
 | Python 文件 | Rust/wasm 落点 |
 |---|---|
-| `fleetlib/proxy.py` | `plugins/connectors/gpu-cluster`（SOCKS5 握手在 `trestle-transport::dial`） |
+| `fleetlib/proxy.py` | `plugins/connectors/ssh-socks5`（SOCKS5 握手在 `trestle-transport::dial`） |
 | `fleetlib/pool.py` | connector 插件的长连接逻辑 + `trestle-transport::deploy` |
 | `remote/fleet_agent.py` | `agent-py/trestle_agent.py` |
 | `fleetlib/ops.py` | `agent-py` 的 put_chunk/get_chunk + `trestle-transport::transfer` |

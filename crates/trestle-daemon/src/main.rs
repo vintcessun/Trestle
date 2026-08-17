@@ -105,7 +105,9 @@ async fn run(cli: Cli) -> trestle_core::Result<()> {
                 events: Arc::new(PluginEventSink::new(bus.clone())),
                 tasks: Arc::clone(&scheduler) as Arc<dyn trestle_host::tool_state::TaskSink>,
                 ws: Arc::new(tasks::DeferredWs(Arc::clone(&ws_state_holder))),
-                ..Default::default()
+                policy: trestle_host::pool::PoolPolicy::default()
+                    .with_max(store.config().daemon.pool_max)
+                    .with_idle_secs(store.config().daemon.pool_idle_secs),
             },
         )
         .await?,
@@ -166,6 +168,25 @@ async fn run(cli: Cli) -> trestle_core::Result<()> {
     });
 
     scheduler.run(Arc::clone(&host));
+
+    // 实例池的巡检。池在撞上并发时会自己长，长完不会自己缩——一次调用不该
+    // 为了归还内存去等一轮回收。所以收回放在这条独立的定时器上，闲够了
+    // 一次还一个。
+    {
+        let host = Arc::clone(&host);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(
+                trestle_host::pool::SWEEP_INTERVAL_SECS,
+            ));
+            loop {
+                tick.tick().await;
+                let reclaimed = host.sweep_pools().await;
+                if reclaimed > 0 {
+                    tracing::debug!(reclaimed, "reclaimed idle plugin instances");
+                }
+            }
+        });
+    }
 
     tracing::info!(
         ipc = port,

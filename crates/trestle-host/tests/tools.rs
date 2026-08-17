@@ -57,8 +57,8 @@ async fn build_host() -> (TrestleHost, Arc<Collector>) {
     let events = Arc::new(Collector::default());
     let opts = HostOptions {
         events: Arc::clone(&events) as Arc<dyn EventSink>,
-        // 池子小一点，测试起得快。
-        pool_size: 2,
+        // 上限压到 2：测试要的是「会不会长」，不是「能长多大」。
+        policy: trestle_host::pool::PoolPolicy::default().with_max(2),
         ..Default::default()
     };
     let h = TrestleHost::start(store, opts).await.unwrap_or_else(|e| {
@@ -127,26 +127,28 @@ async fn every_tool_that_names_a_machine_requires_it() {
 }
 
 #[tokio::test]
-async fn a_stateless_plugin_gets_a_pool_and_a_stateful_one_does_not() {
+async fn only_a_stateless_plugin_is_allowed_to_grow_a_pool() {
     let (h, _) = host().await;
 
-    // 一个 wasm 实例被调用期间是独占的，所以「几个实例」就等于「几个 agent
-    // 能同时用这个插件而不互相等」。声明了 stateless 的才给池。
+    // 每个插件都**从一个实例起**：绝大多数插件这辈子不会被并发调用，
+    // 为它们预留实例是纯浪费。区别在上限——撞上并发时准不准长。
     let job = h.tools.instance_of("job").await.expect("job is loaded");
     assert!(job.manifest.capabilities.stateless);
+    assert_eq!(job.pool.size(), 1, "a pool must start at one instance");
     assert!(
-        job.pool.size() > 1,
-        "job declared itself stateless but only got {} instance",
-        job.pool.size()
+        job.pool.max() > 1,
+        "job declared itself stateless but its pool is capped at {}",
+        job.pool.max()
     );
 
-    // hello-py 没声明（18 MB 的组件，池化就是 ×N 内存），所以只有一个。
+    // hello-py 没声明 stateless，所以上限就是 1：它可能把状态存在 wasm 内存里，
+    // 多开会让实例各看各的，而且是静默出错。
     if let Some(py) = h.tools.instance_of("hello-py").await {
         assert!(!py.manifest.capabilities.stateless);
         assert_eq!(
-            py.pool.size(),
+            py.pool.max(),
             1,
-            "a plugin that did not declare stateless must not be pooled — \
+            "a plugin that did not declare stateless must never be pooled — \
              it may keep state in wasm memory, and pooling would silently split it"
         );
     }
@@ -181,10 +183,29 @@ async fn two_agents_calling_the_same_tool_do_not_block_each_other() {
     b.expect("second shell");
     let elapsed = started.elapsed();
 
-    println!("two fs_list in {both:?}, two 2s shells in {elapsed:?}");
+    let fs = h.tools.instance_of("fs").await.expect("fs is loaded");
+    let connector = h.fleet.pool("gpu-cluster").expect("connector pool");
+    println!(
+        "two fs_list in {both:?}, two 2s shells in {elapsed:?}; \
+         fs pool {} → {}, connector pool {} → {}",
+        1,
+        fs.pool.high_water(),
+        1,
+        connector.high_water()
+    );
     assert!(
         elapsed < std::time::Duration::from_millis(3500),
         "two concurrent 2s calls took {elapsed:?} — they are serialising, not overlapping"
+    );
+    // 池是**遇到并发才长**的，所以这里同时也是「它真的长过」的证据：
+    // 起来时只有一个实例，两路并发之后必须多过一个。
+    assert!(
+        connector.high_water() > 1,
+        "the connector pool never grew past one instance"
+    );
+    assert!(
+        fs.pool.high_water() > 1,
+        "the fs tool pool never grew past one instance"
     );
 }
 

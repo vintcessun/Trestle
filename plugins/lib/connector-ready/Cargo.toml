@@ -1,0 +1,13 @@
+# 两个 connector 驱动共用的「前置条件」状态机。
+#
+# 它同时是 workspace 的成员和两个 wasm 插件的 path 依赖：前者让这段逻辑能用
+# 普通的 `cargo test` 测（不必先起一个 wasm 实例），后者让它真的只有一份。
+[package]
+name = "connector-ready"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "connector 的前置条件状态机：探不通就按配置把它拉起来"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }

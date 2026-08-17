@@ -13,6 +13,7 @@ pub mod gpu;
 pub mod handles;
 pub mod host;
 pub mod imports;
+pub mod pool;
 pub mod runtime;
 pub mod state;
 pub mod tool_state;

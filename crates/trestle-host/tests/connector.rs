@@ -74,16 +74,30 @@ async fn shared(name: &'static str) -> &'static trestle_host::runtime::Connector
         .await
 }
 
+/// 按**配置里的 connector 名**实例化——驱动是哪个由配置说了算。
+///
+/// 这个间接层就是 `[connectors.gpu-cluster] plugin = "ssh-socks5"` 那一行：
+/// 驱动是通用的，「gpu-cluster」是它的一个实例。
 async fn instantiate(
     name: &str,
     events: Arc<Collector>,
 ) -> trestle_host::runtime::ConnectorInstance {
     let store = config_store();
     let runtime = Runtime::with_events(Arc::clone(&store), events).expect("runtime");
-    let dir = plugin_dir("connectors", name);
-    let loaded = runtime.load_connector(&dir).unwrap_or_else(|e| {
-        panic!("cannot load {name}: {e:#}\n(run scripts/build-plugins.ps1 first)")
+    let section = store
+        .connector_section(name)
+        .unwrap_or_else(|e| panic!("no [connectors.{name}] in the config: {e}"));
+    let dir = plugin_dir("connectors", &section.plugin);
+    let mut loaded = runtime.load_connector(&dir).unwrap_or_else(|e| {
+        panic!(
+            "cannot load {} (driver of {name}): {e:#}\n(run scripts/build-plugins.ps1 first)",
+            section.plugin
+        )
     });
+    // host 做的同一件事：配置里的授权并进 manifest 的白名单。
+    for prog in &section.allow_exec {
+        loaded.manifest.capabilities.local_exec.push(prog.clone());
+    }
 
     let registry = store.targets().expect("targets");
     let mine: Vec<_> = registry
@@ -91,18 +105,28 @@ async fn instantiate(
         .filter(|t| t.connector == name)
         .cloned()
         .collect();
-    let config_json = serde_json::to_string(
-        &store
-            .connector_section(name)
-            .map(|c| c.settings.clone())
-            .unwrap_or_default(),
-    )
-    .unwrap();
+    let config_json = serde_json::to_string(&section.settings).unwrap();
 
     runtime
         .instantiate_connector(&loaded, mine, config_json)
         .await
         .unwrap_or_else(|e| panic!("cannot instantiate {name}: {e:#}"))
+}
+
+/// 一个 ready 配置：代理指向一个没人听的端口，逼 `ensure-ready` 走到
+/// 「去把它拉起来」那一步。
+fn config_that_forces_a_start() -> String {
+    serde_json::json!({
+        "socks": "127.0.0.1:9",
+        "ready": {
+            "check": ["docker", "ps", "-a", "--filter", "name=^nope$", "--format", "{{.Names}}"],
+            "check_expect": "nope",
+            "start": ["docker", "start", "nope"],
+            "timeout_secs": 1,
+            "cache_secs": 0
+        }
+    })
+    .to_string()
 }
 
 #[tokio::test]
@@ -163,35 +187,104 @@ async fn the_two_connectors_manage_disjoint_machines() {
 }
 
 #[tokio::test]
-async fn stripping_the_allowlist_actually_blocks_the_call() {
-    // M2 的验收项：manifest 里去掉 docker 之后，同一次调用必须被拒绝，
-    // 而且这次拒绝必须**看得见**——否则权限模型就是个黑盒。
+async fn the_real_config_is_what_carries_the_start_command() {
+    // 拉起代理的那条命令以前写死在驱动里。现在它在配置里，所以这条断言守着
+    // 那根线还接着——驱动通用了，但这一组机器仍然知道自己该怎么被叫醒。
+    let store = config_store();
+    let lab = store.connector_section("gpu-cluster").expect("section");
+    assert_eq!(lab.plugin, "ssh-socks5");
+    assert!(
+        lab.allow_exec.iter().any(|p| p == "docker"),
+        "allow_exec = {:?}",
+        lab.allow_exec
+    );
+    let start = lab.settings["ready"]["start"].as_array().expect("start");
+    let start: Vec<&str> = start.iter().map(|v| v.as_str().unwrap()).collect();
+    assert_eq!(start, ["docker", "start", "vpn-proxy"]);
+    // 「不存在时怎么办」必须给出创建命令——报错却不说下一步，等于没报。
+    let remedy = lab.settings["ready"]["missing_remedy"].as_str().unwrap();
+    assert!(remedy.contains("docker run"), "{remedy}");
+
+    // 直连那一组没有前置条件，所以也不该有任何本机命令的授权。
+    let mine = store.connector_section("cloud").expect("section");
+    assert_eq!(mine.plugin, "ssh-direct");
+    assert!(mine.allow_exec.is_empty(), "{:?}", mine.allow_exec);
+    assert!(mine.settings.get("ready").is_none());
+}
+
+#[tokio::test]
+async fn a_generic_driver_ships_with_no_local_commands_allowed() {
+    // 通用驱动不知道你的代理是 docker 起的还是别的，所以它没资格替你声明
+    // 「我需要跑 docker」。manifest 里那份白名单必须是空的。
+    let store = config_store();
+    let runtime = Runtime::new(Arc::clone(&store)).expect("runtime");
+    for driver in ["ssh-socks5", "ssh-direct"] {
+        let loaded = runtime
+            .load_connector(&plugin_dir("connectors", driver))
+            .unwrap_or_else(|e| panic!("cannot load {driver}: {e:#}"));
+        assert!(
+            loaded.manifest.capabilities.local_exec.is_empty(),
+            "{driver} self-granted {:?} in its manifest",
+            loaded.manifest.capabilities.local_exec
+        );
+    }
+}
+
+#[tokio::test]
+async fn without_allow_exec_the_start_command_is_blocked_and_says_so() {
+    // 权限模型的验收项：没在配置里授权就跑不了本机命令，而且这次拒绝必须
+    // **看得见**——否则出问题时没人知道是被挡了还是根本没调。
     let events = Arc::new(Collector::default());
     let store = config_store();
     let sink: Arc<dyn EventSink> = Arc::clone(&events) as Arc<dyn EventSink>;
     let runtime = Runtime::with_events(Arc::clone(&store), sink).expect("runtime");
-    let mut loaded = runtime
-        .load_connector(&plugin_dir("connectors", "gpu-cluster"))
+    // 原样加载 = 没有任何 allow_exec。
+    let loaded = runtime
+        .load_connector(&plugin_dir("connectors", "ssh-socks5"))
         .expect("load");
 
-    // 原样的 manifest 是允许 docker 的；这里把白名单清空。
-    assert!(loaded.manifest.capabilities.allows_local_exec("docker"));
-    loaded.manifest.capabilities.local_exec.clear();
-
-    // 把代理指到一个没人听的端口，逼 ensure-ready 走到「去叫醒容器」那一步。
-    let config_json = r#"{"socks":"127.0.0.1:9","ready_timeout_secs":2,"ready_cache_secs":0}"#;
     let c = runtime
-        .instantiate_connector(&loaded, Vec::new(), config_json.into())
+        .instantiate_connector(&loaded, Vec::new(), config_that_forces_a_start())
         .await
         .expect("instantiate");
 
     let err = c.ensure_ready().await.expect_err("must be denied");
     let msg = err.to_string();
     assert!(msg.contains("docker"), "{msg}");
-    assert!(msg.contains("denied") || msg.contains("allowlist"), "{msg}");
+    // 错误必须指向**配置**，不是指向 docker——被挡住和命令失败是两件事。
+    assert!(msg.contains("allow_exec"), "{msg}");
     assert!(
         events.saw("plugin_call_denied"),
         "a denied call must be visible in the event stream"
+    );
+}
+
+#[tokio::test]
+async fn allow_exec_in_the_config_is_what_grants_it() {
+    // 另一个方向：配置里授权之后，同一次调用不再是「被拒绝」。
+    // 它多半还是会失败（这里那个容器根本不存在），但失败的**原因**不同了——
+    // 这正是这两条测试要区分的东西。
+    let store = config_store();
+    let runtime = Runtime::new(Arc::clone(&store)).expect("runtime");
+    let mut loaded = runtime
+        .load_connector(&plugin_dir("connectors", "ssh-socks5"))
+        .expect("load");
+    loaded
+        .manifest
+        .capabilities
+        .local_exec
+        .push("docker".into());
+
+    let c = runtime
+        .instantiate_connector(&loaded, Vec::new(), config_that_forces_a_start())
+        .await
+        .expect("instantiate");
+
+    let err = c.ensure_ready().await.expect_err("that container is fake");
+    let msg = err.to_string();
+    assert!(
+        !msg.contains("allow_exec"),
+        "still being denied after the config granted it: {msg}"
     );
 }
 

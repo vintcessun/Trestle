@@ -30,7 +30,7 @@ pub struct ToolDescriptor {
 pub struct LoadedTool {
     pub manifest: Manifest,
     pub tools: Vec<ToolDescriptor>,
-    /// 实例池。声明了 `stateless` 的插件有多个实例，否则只有一个。
+    /// 实例池。声明了 `stateless` 的插件撞上并发时会自己长，否则钉死在一个实例上。
     pub pool: Arc<ToolPool>,
 }
 
@@ -106,7 +106,7 @@ impl ToolRegistry {
                 path: "plugins".into(),
                 detail: format!("plugin '{plugin}' is not loaded"),
             })?;
-        loaded.pool.pick().call(tool, args).await
+        loaded.pool.pick().await.call(tool, args).await
     }
 
     pub async fn instance_of(&self, plugin: &str) -> Option<Arc<LoadedTool>> {

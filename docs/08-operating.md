@@ -41,10 +41,13 @@ Rust 插件几百 KB 无所谓，但一个 componentize-py 产出的插件是 18
 一个文件、一个入口。分节：`[daemon]` `[defaults]` `[connectors.<name>]` `[targets.<name>]`。
 
 ```toml
-[connectors.gpu-cluster]
-plugin = "gpu-cluster"
+[connectors.gpu-cluster]     # 配置节的名字 = 这一组机器的称呼
+plugin = "ssh-socks5"            # 驱动：通用的「经 SOCKS5 连过去的 SSH」
 socks = "127.0.0.1:11080"
-container = "vpn-proxy"
+allow_exec = ["docker"]          # 准它在本机跑什么
+
+[connectors.gpu-cluster.ready]   # 前置条件：探不通就把代理拉起来
+start = ["docker", "start", "vpn-proxy"]
 
 [targets.gpu-4]
 connector = "gpu-cluster"

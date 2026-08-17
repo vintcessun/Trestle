@@ -7,6 +7,9 @@ members = [
     "crates/trestle-daemon",
     "crates/trestle-mcp",
     "crates/trestle-cli",
+    # 两个 connector 驱动共用的前置条件状态机。它编进 wasm 插件，但也在这里，
+    # 好让那段逻辑能用普通的 cargo test 测。
+    "plugins/lib/connector-ready",
 ]
 
 [workspace.package]

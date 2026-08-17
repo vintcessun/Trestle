@@ -30,8 +30,8 @@
 │  │  capability 强制 · 实例池 · target → connector 路由          │  │
 │  │                                                             │  │
 │  │   plugins/tools/*.wasm            plugins/connectors/*.wasm │  │
-│  │   job·fs·xfer·fleet·monitor         gpu-cluster         │  │
-│  │        │                            cloud              │  │
+│  │   job·fs·xfer·fleet·monitor         ssh-socks5            │  │
+│  │        │                            ssh-direct            │  │
 │  │        │ 调七个基本操作                      ▲               │  │
 │  │        └────► Router: target → connector ───┘ 实现七个基本操作│  │
 │  └──────────────────────────────────┬──────────────────────────┘  │
@@ -108,7 +108,8 @@ crates/
   trestle-cli         trestle 命令行，瘦客户端
 agent-py/             标准远端 agent（uv），七个操作的远端一侧
 plugins/
-  connectors/         gpu-cluster · cloud
+  connectors/         ssh-socks5 · ssh-direct（驱动；配置节才是 connector 实例）
+  lib/                connector-ready（两个驱动共用的前置条件状态机）
   tools/              job · fs · xfer · fleet · monitor · hello-py
   templates/rust/     `trestle plugin new` 的脚手架
 wit/trestle.wit       插件接口（connector 与 tool-plugin 两个世界）
@@ -131,11 +132,11 @@ trestle-mcp ──IPC──► trestled
                         │ gpu.allocate("gpu-4", 2)   ← host 单点仲裁，排队而不是抢锁
                         │ base.call("gpu-4", "shell", {detach:true, env:{CUDA_VISIBLE_DEVICES}})
                         ▼
-                    Router: gpu-4 → gpu-cluster.wasm
+                    Router: gpu-4 → gpu-cluster（驱动 ssh-socks5.wasm）
                         ▼
-                    gpu-cluster.wasm
+                    ssh-socks5.wasm
                         │ session-lookup("gpu-4") → 有活连接就直接用
-                        │ 没有：probe 11080 → local.exec(docker start) → dial-socks5
+                        │ 没有：probe 11080 → local.exec(配置里那条 start) → dial-socks5
                         │       → ssh.connect → agent.ensure（按 hash 幂等部署）
                         ▼
                     agent.call(handle, "shell", …)

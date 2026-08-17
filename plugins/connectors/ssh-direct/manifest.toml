@@ -1,0 +1,11 @@
+name = "ssh-direct"
+version = "0.1.0"
+kind = "connector"
+description = "标准 SSH 直连。要先拨 VPN 之类的可以在配置里给 ready.start"
+
+[capabilities]
+# 同 ssh-socks5：本机命令的白名单由**配置**给（allow_exec），不由驱动自己声明。
+# 直连一般根本不需要跑任何本机命令，所以不配就是一条都不许跑。
+local_exec = []
+dial = []
+forward = true

@@ -53,6 +53,14 @@ pub struct DaemonConfig {
     /// Monitor / Web UI 的 HTTP 服务绑定。
     #[serde(default = "default_http_bind")]
     pub http_bind: String,
+    /// 一个插件最多能有几个 wasm 实例 = 它最多能几路并发。**0 = 跟 CPU 核心数走**。
+    ///
+    /// 池从 1 个实例起，撞上并发才指数长到这个上限。
+    #[serde(default)]
+    pub pool_max: usize,
+    /// 一个池连续这么久没撞上并发，就开始一个一个把实例收回来。0 = 用默认值。
+    #[serde(default)]
+    pub pool_idle_secs: u64,
 }
 
 impl Default for DaemonConfig {
@@ -61,6 +69,8 @@ impl Default for DaemonConfig {
             idle_timeout_secs: default_idle_timeout(),
             ipc_bind: default_ipc_bind(),
             http_bind: default_http_bind(),
+            pool_max: 0,
+            pool_idle_secs: 0,
         }
     }
 }
@@ -131,10 +141,20 @@ fn default_exclude() -> Vec<String> {
 /// 一个 connector 的配置节。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectorConfig {
-    /// 加载哪个 connector 插件（`plugins/connectors/<plugin>.wasm`）。
+    /// 加载哪个 connector **驱动**（`plugins/connectors/<plugin>/<plugin>.wasm`）。
+    ///
+    /// 驱动是通用的（`ssh-socks5`、`ssh-direct`），配置节的名字才是这一组机器的
+    /// 称呼（`gpu-cluster`）。同一个驱动可以被配置成任意多个 connector。
     pub plugin: String,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// 准这个 connector 在**本机**跑哪些命令（按 argv[0] 的基名精确匹配）。
+    ///
+    /// 通用驱动没法在自己的 manifest 里预知你要用 `docker` 还是 `wg-quick` 把
+    /// 前置条件拉起来，所以这份授权由你在配置里给。host 把它并进 manifest 的
+    /// 白名单——**本机跑任意命令等于全部权限**，所以这里写的东西要看清楚。
+    #[serde(default)]
+    pub allow_exec: Vec<String>,
     /// 插件自己的设置，host 不解释。
     #[serde(flatten)]
     pub settings: toml::Table,
@@ -428,7 +448,7 @@ mod tests {
         let config: Config = toml::from_str(
             r#"
             [connectors.gpu-cluster]
-            plugin = "gpu-cluster"
+            plugin = "ssh-socks5"
 
             [targets.gpu-4]
             connector = "typo-here"
@@ -456,14 +476,14 @@ mod tests {
         let config: Config = toml::from_str(
             r#"
             [connectors.gpu-cluster]
-            plugin = "gpu-cluster"
+            plugin = "ssh-socks5"
             socks = "127.0.0.1:11080"
             container = "vpn-proxy"
             "#,
         )
         .unwrap();
         let c = &config.connectors["gpu-cluster"];
-        assert_eq!(c.plugin, "gpu-cluster");
+        assert_eq!(c.plugin, "ssh-socks5");
         assert!(c.enabled);
         // host 不解释这些字段，原样交给插件。
         assert_eq!(c.settings["socks"].as_str(), Some("127.0.0.1:11080"));

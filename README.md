@@ -67,7 +67,7 @@ $ trestle plugin new mytool          # 生成脚手架 → 编译 → reload →
 ```
 crates/     core · transport · host · daemon · mcp · cli
 agent-py/   标准远端 agent（uv，常驻，只用标准库）
-plugins/    connectors/{gpu-cluster,cloud}
+plugins/    connectors/{ssh-socks5,ssh-direct} · lib/connector-ready
             tools/{job,fs,xfer,fleet,monitor,hello-py}
             templates/rust/   ← trestle plugin new 的模板
 wit/        插件接口（connector 与 tool-plugin 两个世界）

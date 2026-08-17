@@ -1,0 +1,20 @@
+name = "ssh-socks5"
+version = "0.1.0"
+kind = "connector"
+description = "经 SOCKS5 代理连过去的 SSH。代理怎么拉起来由配置说了算"
+
+# 这个插件能做什么，就这些。host 在每个导入的入口处强制，插件绕不过去——
+# wasm 组件没有 syscall，这些导入是它唯一能碰到外界的地方。
+[capabilities]
+# **空的**。这是一个通用驱动：它不知道你的代理是 docker 起的还是 systemd 起的，
+# 所以它没有资格替你声明「我需要跑 docker」。那份授权在配置里：
+#
+#   [connectors.<你的名字>]
+#   allow_exec = ["docker"]
+#
+# host 会把配置里那份并进这个白名单。manifest 是插件作者说「我需要什么」，
+# 配置是你说「我准你跑什么」——通用驱动只能说后半句由你定。
+local_exec = []
+# connector 天生要连任意目标机器，所以不限制拨号。
+dial = []
+forward = true

@@ -16,7 +16,17 @@ use trestle_core::{Result as TResult, Target, TrestleError};
 
 use crate::bindings::Connector as ConnectorBindings;
 use crate::capability::Manifest;
+use crate::pool::{Factory, InstancePool, PoolPolicy};
 use crate::state::{EventSink, NullSink, PluginKv, PluginState, SharedConnector, sandboxed_wasi};
+
+/// 一个 connector 的实例池。
+///
+/// 所有实例共享连接（见 [`SharedConnector`]）与 KV，所以对外它们是可互换的——
+/// 谁空着就用谁。这是「同时打整支机队」能真并发的原因。
+pub type ConnectorPool = InstancePool<ConnectorInstance>;
+
+/// 一个技能插件的实例池。和 [`ConnectorPool`] 是同一个东西，只是装的是技能插件。
+pub type ToolPool = InstancePool<ToolInstance>;
 
 /// 共享的编译环境。Engine 很贵，全进程一个。
 pub struct Runtime {
@@ -87,54 +97,76 @@ impl Runtime {
         })
     }
 
-    /// 实例化一个 connector，拿到可调用的句柄。
+    /// 实例化一个 connector，拿到可调用的句柄。名字用插件名——单测走这条。
     pub async fn instantiate_connector(
         &self,
         loaded: &LoadedConnector,
         targets: Vec<Target>,
         config_json: String,
     ) -> anyhow::Result<ConnectorInstance> {
-        self.instantiate_connector_with(loaded, targets, config_json, Default::default())
-            .await
+        let kv = Arc::new(PluginKv::open(
+            &self.store.state_dir(),
+            &loaded.manifest.name,
+        ));
+        self.instantiate_connector_with(
+            loaded,
+            loaded.manifest.name.clone(),
+            targets,
+            config_json,
+            Default::default(),
+            kv,
+        )
+        .await
     }
 
-    /// 起一个实例池：同一个 connector 的 N 个实例**共享连接**。
+    /// 起一个 connector 的实例池。
     ///
-    /// 一个 wasm 实例在被调用期间是独占的，所以「同时打整支机队」需要多个实例；
-    /// 但连接不该跟着实例走，否则六个实例就会建六条到同一台机器的连接。
-    pub async fn instantiate_pool(
-        &self,
-        loaded: &LoadedConnector,
+    /// 池里的实例**共享连接和 KV**：一个 wasm 实例被调用期间是独占的，所以
+    /// 「同时打整支机队」需要多个实例；但连接不该跟着实例走，否则六个实例
+    /// 就会建六条到同一台机器的连接，而 KV 会分裂成六份各写各的缓存。
+    ///
+    /// `instance` 是**配置里的 connector 名**（`gpu-cluster`），不是插件名
+    /// （`ssh-socks5`）。同一个插件可以被配置成多个 connector，各管各的机器、
+    /// 各有各的 KV——所以隔离必须按实例名来。
+    pub async fn connector_pool(
+        self: &Arc<Self>,
+        loaded: Arc<LoadedConnector>,
+        instance: String,
         targets: Vec<Target>,
         config_json: String,
-        size: usize,
+        policy: PoolPolicy,
     ) -> anyhow::Result<ConnectorPool> {
         let shared: Arc<SharedConnector> = Default::default();
-        let mut instances = Vec::with_capacity(size.max(1));
-        for _ in 0..size.max(1) {
-            instances.push(
-                self.instantiate_connector_with(
-                    loaded,
-                    targets.clone(),
-                    config_json.clone(),
-                    Arc::clone(&shared),
-                )
-                .await?,
-            );
-        }
-        Ok(ConnectorPool {
-            name: loaded.manifest.name.clone(),
-            instances,
-            next: std::sync::atomic::AtomicUsize::new(0),
-        })
+        let kv = Arc::new(PluginKv::open(&self.store.state_dir(), &instance));
+        let runtime = Arc::clone(self);
+        let name = instance.clone();
+
+        let factory: Factory<ConnectorInstance> = Arc::new(move || {
+            let runtime = Arc::clone(&runtime);
+            let loaded = Arc::clone(&loaded);
+            let instance = name.clone();
+            let targets = targets.clone();
+            let config_json = config_json.clone();
+            let shared = Arc::clone(&shared);
+            let kv = Arc::clone(&kv);
+            Box::pin(async move {
+                runtime
+                    .instantiate_connector_with(&loaded, instance, targets, config_json, shared, kv)
+                    .await
+            })
+        });
+
+        InstancePool::new(instance, factory, policy).await
     }
 
     async fn instantiate_connector_with(
         &self,
         loaded: &LoadedConnector,
+        instance: String,
         targets: Vec<Target>,
         config_json: String,
         shared: Arc<SharedConnector>,
+        kv: Arc<PluginKv>,
     ) -> anyhow::Result<ConnectorInstance> {
         let mut linker: Linker<PluginState> = Linker::new(&self.engine);
         crate::bindings::trestle::plugin::transport::add_to_linker::<PluginState, HasSelf>(
@@ -150,13 +182,10 @@ impl Runtime {
         wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
 
         let state = PluginState {
-            plugin: loaded.manifest.name.clone(),
+            plugin: instance.clone(),
             manifest: loaded.manifest.clone(),
             shared: Arc::clone(&shared),
-            kv: Arc::new(PluginKv::open(
-                &self.store.state_dir(),
-                &loaded.manifest.name,
-            )),
+            kv,
             events: Arc::clone(&self.events),
             store: Arc::clone(&self.store),
             targets,
@@ -171,19 +200,22 @@ impl Runtime {
             .await
             .map_err(|e| anyhow::anyhow!("cannot instantiate {}: {e}", loaded.path.display()))?;
 
+        // 事件里报的是**实例名**：用户认识的是 `gpu-cluster`，
+        // 而 `ssh-socks5` 只是它碰巧用的那个驱动。
         self.events.emit(
-            &loaded.manifest.name,
+            &instance,
             "info",
             "plugin_loaded",
             &serde_json::json!({
                 "plugin": loaded.manifest.name,
+                "connector": instance,
                 "kind": "connector",
             })
             .to_string(),
         );
 
         Ok(ConnectorInstance {
-            name: loaded.manifest.name.clone(),
+            name: instance,
             inner: Mutex::new(Instance { store, bindings }),
         })
     }
@@ -221,31 +253,35 @@ impl Runtime {
 
     /// 起一个技能插件的实例池。
     ///
-    /// 声明了 `stateless` 的插件拿 `size` 个实例，两个 agent 同时调同一个工具因此
-    /// 互不阻塞；没声明的只拿一个——因为它可能把状态存在 wasm 内存里，
-    /// 而那种情况下池化会让实例各看各的，**静默**出错。
+    /// 声明了 `stateless` 的插件才允许长到 `policy.max`；没声明的钉死在一个实例上——
+    /// 它可能把状态存在 wasm 内存里，那种情况下多开会让实例各看各的，**静默**出错。
     ///
     /// `make_state` 每个实例调一次：`ToolState` 里有 `WasiCtx`，不能克隆。
-    pub async fn instantiate_tool_pool(
-        &self,
-        loaded: &LoadedToolPlugin,
-        mut make_state: impl FnMut() -> crate::tool_state::ToolState,
-        size: usize,
+    pub async fn tool_pool(
+        self: &Arc<Self>,
+        loaded: Arc<LoadedToolPlugin>,
+        make_state: Arc<dyn Fn() -> crate::tool_state::ToolState + Send + Sync>,
+        policy: PoolPolicy,
     ) -> anyhow::Result<ToolPool> {
-        let size = if loaded.manifest.capabilities.stateless {
-            size.max(1)
+        let policy = if loaded.manifest.capabilities.stateless {
+            policy
         } else {
-            1
+            PoolPolicy {
+                max: 1,
+                ..policy
+            }
         };
-        let mut instances = Vec::with_capacity(size);
-        for _ in 0..size {
-            instances.push(self.instantiate_tool(loaded, make_state()).await?);
-        }
-        Ok(ToolPool {
-            name: loaded.manifest.name.clone(),
-            instances,
-            next: std::sync::atomic::AtomicUsize::new(0),
-        })
+        let name = loaded.manifest.name.clone();
+        let runtime = Arc::clone(self);
+
+        let factory: Factory<ToolInstance> = Arc::new(move || {
+            let runtime = Arc::clone(&runtime);
+            let loaded = Arc::clone(&loaded);
+            let state = make_state();
+            Box::pin(async move { runtime.instantiate_tool(&loaded, state).await })
+        });
+
+        InstancePool::new(name, factory, policy).await
     }
 
     /// 实例化一个技能插件。
@@ -367,11 +403,6 @@ impl ConnectorInstance {
             .map_err(|e| self.trap(e))
     }
 
-    /// 这个实例当前有没有被占用。实例池靠它挑空闲的那个。
-    pub fn is_free(&self) -> bool {
-        self.inner.try_lock().is_ok()
-    }
-
     /// 插件自己崩了（trap）与插件返回了一个错误是两回事，必须分得开。
     fn trap(&self, e: wasmtime::Error) -> TrestleError {
         TrestleError::Protocol {
@@ -438,11 +469,6 @@ impl ToolInstance {
             .map_err(|e| self.trap(e))
     }
 
-    /// 这个实例当前有没有被占用。实例池靠它挑空闲的那个。
-    pub fn is_free(&self) -> bool {
-        self.inner.try_lock().is_ok()
-    }
-
     /// 这个插件贡献的 Web UI 片段。空串表示它不要面板。
     pub async fn ui_panel(&self) -> TResult<String> {
         let mut g = self.inner.lock().await;
@@ -458,71 +484,6 @@ impl ToolInstance {
             target: String::new(),
             detail: format!("plugin '{}' trapped: {e}", self.name),
         }
-    }
-}
-
-/// 一个技能插件的实例池。
-///
-/// 和 [`ConnectorPool`] 是同一个东西，只是装的是技能插件。存在的理由也一样：
-/// 一个 wasm 实例被调用期间是独占的，所以「几个实例」就等于「几个 agent
-/// 能同时用这个插件而不互相等」。
-pub struct ToolPool {
-    pub name: String,
-    instances: Vec<ToolInstance>,
-    next: std::sync::atomic::AtomicUsize,
-}
-
-impl ToolPool {
-    /// 挑一个当前没被占用的实例；都忙就轮转到下一个等着。
-    pub fn pick(&self) -> &ToolInstance {
-        for inst in &self.instances {
-            if inst.is_free() {
-                return inst;
-            }
-        }
-        let i = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        &self.instances[i % self.instances.len()]
-    }
-
-    /// 池里任意一个都能回答的问题（list-tools / ui-panel / on-tick）用它。
-    pub fn any(&self) -> &ToolInstance {
-        &self.instances[0]
-    }
-
-    pub fn size(&self) -> usize {
-        self.instances.len()
-    }
-}
-
-/// 一个 connector 的实例池。
-///
-/// 所有实例共享连接（见 [`SharedConnector`]），所以对外它们是可互换的——
-/// 谁空着就用谁。这是「同时打整支机队」能真并发的原因。
-pub struct ConnectorPool {
-    pub name: String,
-    instances: Vec<ConnectorInstance>,
-    next: std::sync::atomic::AtomicUsize,
-}
-
-impl ConnectorPool {
-    /// 挑一个当前没被占用的实例；都忙就轮转到下一个等着。
-    pub fn pick(&self) -> &ConnectorInstance {
-        for inst in &self.instances {
-            if inst.is_free() {
-                return inst;
-            }
-        }
-        let i = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        &self.instances[i % self.instances.len()]
-    }
-
-    /// 池里任意一个实例都能回答的问题（targets / config-schema）用它。
-    pub fn any(&self) -> &ConnectorInstance {
-        &self.instances[0]
-    }
-
-    pub fn size(&self) -> usize {
-        self.instances.len()
     }
 }
 

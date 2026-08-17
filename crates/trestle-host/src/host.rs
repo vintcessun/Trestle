@@ -11,6 +11,7 @@ use trestle_core::{Result, TrestleError};
 
 use crate::fleet::Fleet;
 use crate::gpu::GpuArbiter;
+use crate::pool::PoolPolicy;
 use crate::runtime::Runtime;
 use crate::state::{EventSink, NullSink, PluginKv};
 use crate::tool_state::{NoWs, NullTasks, TaskSink, ToolState, WsHub};
@@ -26,16 +27,16 @@ pub struct TrestleHost {
     runtime: Arc<Runtime>,
     opts_tasks: Arc<dyn TaskSink>,
     opts_ws: Arc<dyn WsHub>,
-    /// 每个池起几个实例。热加载要复用同一个值。
-    pool_size: usize,
+    /// 实例池怎么伸缩。热加载要复用同一份策略。
+    policy: PoolPolicy,
 }
 
 pub struct HostOptions {
     pub events: Arc<dyn EventSink>,
     pub tasks: Arc<dyn TaskSink>,
     pub ws: Arc<dyn WsHub>,
-    /// 每个 connector 起几个实例。见 [`crate::fleet::DEFAULT_POOL_SIZE`]。
-    pub pool_size: usize,
+    /// 实例池的伸缩策略。见 [`crate::pool`]。
+    pub policy: PoolPolicy,
 }
 
 impl Default for HostOptions {
@@ -44,27 +45,25 @@ impl Default for HostOptions {
             events: Arc::new(NullSink),
             tasks: Arc::new(NullTasks),
             ws: Arc::new(NoWs),
-            pool_size: crate::fleet::DEFAULT_POOL_SIZE,
+            policy: PoolPolicy::default(),
         }
     }
 }
 
 impl TrestleHost {
     pub async fn start(store: Arc<ConfigStore>, opts: HostOptions) -> Result<Self> {
-        let runtime =
+        let runtime = Arc::new(
             Runtime::with_events(Arc::clone(&store), Arc::clone(&opts.events)).map_err(|e| {
                 TrestleError::Config {
                     path: "wasm runtime".into(),
                     detail: format!("{e:#}"),
                 }
-            })?;
-
-        let fleet = Arc::new(
-            Fleet::load_with_pool_size(&runtime, Arc::clone(&store), opts.pool_size).await?,
+            })?,
         );
+
+        let fleet = Arc::new(Fleet::load(&runtime, Arc::clone(&store), opts.policy).await?);
         let gpu = Arc::new(GpuArbiter::new(Arc::clone(&fleet)));
         let tools = Arc::new(ToolRegistry::default());
-        let runtime = Arc::new(runtime);
 
         let host = Self {
             store: Arc::clone(&store),
@@ -75,10 +74,24 @@ impl TrestleHost {
             runtime: Arc::clone(&runtime),
             opts_tasks: Arc::clone(&opts.tasks),
             opts_ws: Arc::clone(&opts.ws),
-            pool_size: opts.pool_size,
+            policy: opts.policy,
         };
         host.load_tools().await?;
         Ok(host)
+    }
+
+    /// 巡检所有实例池，把闲太久的实例还回去。daemon 定期叫它。
+    ///
+    /// 放在 daemon 的定时器上而不是插件的 TaskScheduler 上：那个调度器是给
+    /// 插件的 `on-tick` 用的，把 host 自己的家务混进去会让两者的失败互相牵连。
+    pub async fn sweep_pools(&self) -> usize {
+        let mut reclaimed = self.fleet.sweep_pools();
+        for name in self.tools.plugin_names().await {
+            if let Some(loaded) = self.tools.instance_of(&name).await {
+                reclaimed += loaded.pool.sweep();
+            }
+        }
+        reclaimed
     }
 
     /// 重新扫描插件目录并热加载。
@@ -112,22 +125,34 @@ impl TrestleHost {
             // KV 在池里的实例之间**共享**：插件的跨调用状态该在这里，
             // 而不是在 wasm 内存里（那样池化会让实例各看各的）。
             let kv = Arc::new(PluginKv::open(&store.state_dir(), &name));
-            let make_state = || {
+            let loaded = Arc::new(loaded);
+            let manifest = loaded.manifest.clone();
+
+            // 池随时可能自己再长一个实例出来，所以造 state 这件事得留成一个
+            // 能反复调的闭包——而且只能捕获 Arc，不能借 `self`。
+            let (fleet, gpu, tools_ref) = (Arc::clone(fleet), Arc::clone(gpu), Arc::clone(tools));
+            let (events, tasks, ws) = (
+                Arc::clone(&self.events),
+                Arc::clone(&self.opts_tasks),
+                Arc::clone(&self.opts_ws),
+            );
+            let for_state = manifest.clone();
+            let make_state: Arc<dyn Fn() -> ToolState + Send + Sync> = Arc::new(move || {
                 ToolState::new(
-                    loaded.manifest.clone(),
-                    Arc::clone(fleet),
-                    Arc::clone(gpu),
+                    for_state.clone(),
+                    Arc::clone(&fleet),
+                    Arc::clone(&gpu),
                     Arc::clone(&kv),
-                    Arc::clone(&self.events),
-                    Arc::clone(&self.opts_tasks),
-                    Arc::clone(&self.opts_ws),
-                    Arc::clone(tools),
+                    Arc::clone(&events),
+                    Arc::clone(&tasks),
+                    Arc::clone(&ws),
+                    Arc::clone(&tools_ref),
                     config_json.clone(),
                 )
-            };
+            });
 
             let pool = runtime
-                .instantiate_tool_pool(&loaded, make_state, self.pool_size)
+                .tool_pool(loaded, make_state, self.policy)
                 .await
                 .map_err(|e| TrestleError::Config {
                     path: dir.display().to_string(),
@@ -140,7 +165,7 @@ impl TrestleHost {
             let descriptors = parse_descriptors(&name, &raw)?;
             tools
                 .register(LoadedTool {
-                    manifest: loaded.manifest,
+                    manifest,
                     tools: descriptors,
                     pool,
                 })
@@ -181,7 +206,8 @@ impl TrestleHost {
             let Some(loaded) = self.tools.instance_of(&name).await else {
                 continue;
             };
-            match loaded.pool.any().ui_panel().await {
+            let instance = loaded.pool.any();
+            match instance.ui_panel().await {
                 Ok(html) if !html.trim().is_empty() => out.push((name, html)),
                 Ok(_) => {}
                 Err(e) => {

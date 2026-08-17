@@ -5,14 +5,34 @@
 
 它同时是**集约管理的单位**：`targets_list` 按 connector 分组，agent 挑机器时先看归属哪一组。
 
-现在有两个，接入方式完全正交——这正是对抽象最有力的检验：
+## 驱动与实例
 
-| connector | 机器 | 怎么进去 |
-|---|---|---|
-| `gpu-cluster` | gpu-1 / gpu-2 / gpu-3 / gpu-4 | VPN 容器的 SOCKS5(11080) + 密码 |
-| `cloud` | web-1 / web-2 | 标准 SSH 直连 + `~/.ssh/id_ed25519` 公钥 |
+`.wasm` 是**驱动**，通用；配置节才是**实例**，属于你。
+
+```toml
+[connectors.gpu-cluster]     # ← 实例：这一组机器的称呼，也是它的 KV 命名空间
+plugin = "ssh-socks5"            # ← 驱动：怎么进去
+```
+
+现在有两个驱动，接入方式完全正交——这正是对抽象最有力的检验：
+
+| 驱动 | 怎么进去 |
+|---|---|
+| `ssh-socks5` | 经一个 SOCKS5 代理连过去的 SSH |
+| `ssh-direct` | 标准 SSH 直连 |
+
+配置成的两个实例：
+
+| connector | 驱动 | 机器 | 怎么进去 |
+|---|---|---|---|
+| `gpu-cluster` | `ssh-socks5` | gpu-1 / gpu-2 / gpu-3 / gpu-4 | VPN 容器的 SOCKS5(11080) + 密码 |
+| `cloud` | `ssh-direct` | web-1 / web-2 | 直连 22 + `~/.ssh/id_ed25519` 公钥 |
 
 上层调用这两组机器的代码**一个字都不用改**。
+
+同一个驱动可以配成任意多个实例——再加一组走别的代理的机器，复制一节改个名字就行，
+不用写代码。实例之间的 KV 按**实例名**隔离，不按驱动名，所以两个 `ssh-socks5`
+不会互相踩。
 
 ## 接口
 
@@ -46,9 +66,10 @@ session-remember / session-lookup / session-forget
 
 ### 为什么连接记在 host
 
-host 会给每个 connector 起一个**实例池**（默认 4），让「同时打整支机队」能真并发。
-但连接不该跟着实例走——gpu-4 的连接只该有一条。所以插件用
+host 会给每个 connector 起一个**实例池**（撞上并发就长，见 04），让「同时打整支机队」
+能真并发。但连接不该跟着实例走——gpu-4 的连接只该有一条。所以插件用
 `session-remember` / `session-lookup` 把连接记在 host 那边，池里的实例共享它们。
+KV 同理，而且按**实例名**隔离。
 
 ### 为什么凭据是引用而不是值
 
@@ -56,30 +77,67 @@ host 会给每个 connector 起一个**实例池**（默认 4），让「同时�
 明文因此**从不进入 wasm**。技能插件更进一步——它连 `secret-get` 都会被拒绝：
 它要连机器就走 `base`，认证是 connector 的事。
 
-## `gpu-cluster` 做了什么
+## 前置条件走配置，不走代码
+
+「进去之前得先有点什么」对每个驱动都一样，差别只在**那条命令是什么**——
+而那是配置该说的话。所以两个驱动共用一段状态机（`plugins/lib/connector-ready`）：
 
 ```
-probe 11080 端口
-  ├─ 通 → 直接用（绝大多数调用走这条），成功后缓存 30 秒
-  └─ 不通 → docker ps -a 看容器在不在
-        ├─ 不在 → 报一条能直接照做的错误（带创建命令），不自作主张地建
-        └─ 在   → docker start，然后轮询等端口就绪（上限 40s）
-dial-socks5 → ssh-connect(password) → agent-ensure → 长连接
+probe（不写就用驱动的默认，ssh-socks5 用它的 socks 地址）
+  ├─ 通 → 直接用（绝大多数调用走这条），成功后缓存 cache_secs 秒
+  └─ 不通
+       ├─ 没配 start → 报错，说清楚该往哪写
+       └─ 配了
+            ├─ check 说不在 → 报 missing / missing_remedy，**绝不替你创建**
+            └─ 在 → 跑 start，轮询等 probe 就绪（上限 timeout_secs）
 ```
 
-**只 `docker start`，不 `docker run`、不拉镜像**——容器由用户手工创建一次。
+`gpu-cluster` 的那一节长这样：
+
+```toml
+[connectors.gpu-cluster]
+plugin = "ssh-socks5"
+socks = "127.0.0.1:11080"
+allow_exec = ["docker"]          # 准它在本机跑什么 —— 这份授权只能你给
+
+[connectors.gpu-cluster.ready]
+check = ["docker", "ps", "-a", "--filter", "name=^vpn-proxy$", "--format", "{{.Names}}"]
+check_expect = "vpn-proxy"
+missing_remedy = "docker run -d --name vpn-proxy ..."
+start = ["docker", "start", "vpn-proxy"]
+```
+
+`cloud` 没有这一节——直连没有前置条件。要哪天得先 `wg-quick up`，
+加一节就是了，形状完全一样。
+
+**只 start，从不创建。** `check` 说那个东西不存在，它报一条带创建命令的错误就停下——
+自作主张地建一个容器，是在替你做一个你没同意的决定。
 
 ⚠️ **11080 而不是 1080**：本机 clash/mihomo 占着 1080，Docker Desktop(WSL2) 发布到
 `127.0.0.1:1080` 会**静默失败**——`docker port` 空、主机拒连，但 `docker run` 返回成功。
 这个坑排查花了很久，配置里的默认值和 `config-schema` 的描述都写着它。
 
-## `cloud` 做了什么
+### `allow_exec` 为什么在配置里
 
-```
-dial(host:22) → ssh-connect(pubkey) → agent-ensure → 长连接
+manifest 里那份白名单是**插件作者**说「我需要什么」。但通用驱动没法预知你的代理是
+docker 起的还是 systemd 起的，所以它的 manifest 是空的——那份授权只能**你**给：
+
+```toml
+[connectors.gpu-cluster]
+allow_exec = ["docker"]
 ```
 
-`ensure-ready` 就是一个 `Ok(())`。这个插件顺带说明了「写一个 connector 有多便宜」。
+host 把两份取并集（配置是你写的，所以它是权威）。没授权时报的错直接指向这一行，
+而不是让你去查 docker——「被挡住」和「命令失败」是两件事，糊在一起会把人带偏。
+
+⚠️ **能跑任意本机命令就等于全部权限。** 这是整个 capability 模型最要紧的一道闸，
+白名单按 argv[0] 的基名精确匹配：写 `docker` 不会顺带放行 `docker-compose`。
+
+### 那段状态机能在 host 上测
+
+它抽成了一个普通的 lib crate，外界能力收在一个 `Sys` trait 后面。所以
+「容器不存在时报什么」「start 失败时报什么」「被拒时指向哪」用 `cargo test` 就验得了，
+不必先编一个 wasm 出来。写第三个驱动时这段逻辑是白拿的。
 
 ## 远端 agent
 

@@ -164,7 +164,7 @@ mod tests {
     #[test]
     fn a_manifest_round_trips_through_toml() {
         let raw = r#"
-            name = "gpu-cluster"
+            name = "ssh-socks5"
             kind = "connector"
 
             [capabilities]
@@ -172,7 +172,7 @@ mod tests {
             forward = true
         "#;
         let m: Manifest = toml::from_str(raw).unwrap();
-        assert_eq!(m.name, "gpu-cluster");
+        assert_eq!(m.name, "ssh-socks5");
         assert!(m.capabilities.allows_local_exec("docker"));
         assert!(m.capabilities.forward);
         assert!(!m.capabilities.ws);
