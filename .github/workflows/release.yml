@@ -202,7 +202,10 @@ jobs:
           > Windows 与 Linux 都跑过完整的离线测试套件；连真实服务器的那部分
           > 只在 Windows 上验证过。macOS 的包由 CI 构建并跑离线测试，没有手工验证。
           NOTES
+          # 必须给 --repo：这个 job 只下载产物、**不 checkout 代码**，没有 .git，
+          # gh 推断不出该往哪个仓库发，会直接 "fatal: not a git repository" 退出。
           gh release create "$GITHUB_REF_NAME" artifacts/* \
+            --repo "$GITHUB_REPOSITORY" \
             --title "$GITHUB_REF_NAME" \
             --notes-file notes.md \
             --generate-notes
