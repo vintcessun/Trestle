@@ -102,6 +102,11 @@ jobs:
       - name: 测试
         run: cargo test --workspace
 
+      # 远端 agent 只跑在 POSIX 服务器上，它的测试也要 POSIX（进程组、setsid、
+      # unix socket）。在 Windows 上跑没有意义，脚本本身也会直接退出码 2。
       - name: 远端 agent 协议
+        if: runner.os != 'Windows'
         shell: bash
-        run: python3 agent-py/test_agent.py
+        run: |
+          py=$(command -v python3 || command -v python)
+          "$py" agent-py/test_agent.py

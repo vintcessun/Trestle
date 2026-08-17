@@ -26,6 +26,27 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 AGENT = os.path.join(HERE, "trestle_agent.py")
 
+
+def pid_alive(pid):
+    """这个 pid 现在还在不在。
+
+    别用 `/proc/<pid>`：**macOS 没有 /proc**，那个判断在那里永远是 False，
+    于是「detach 报的 pid 是真任务的 pid」这条断言在 macOS 上必然失败——
+    而 agent 本身是对的，错的是探测方式。
+
+    `os.kill(pid, 0)` 不发信号，只做「存在吗、我有权限吗」两项检查，
+    Linux 与 macOS 行为一致。
+    """
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # 在，只是不归我们管。
+        return True
+    return True
+
+
 failures = []
 passes = 0
 
@@ -227,7 +248,7 @@ def run_all(agent: Agent, tmp: str) -> None:
     check("log path is reported", res["log_path"].endswith("out.log"))
     # 关键：pid 必须是真任务的 pid，不能是 setsid 自己那个转瞬即逝的 pid。
     time.sleep(0.3)
-    alive = os.path.exists("/proc/%d" % res["pid"])
+    alive = pid_alive(res["pid"])
     check("the reported pid is actually alive", alive, "pid=%d" % res["pid"])
     deadline = time.time() + 15
     while time.time() < deadline and not os.path.exists(res["rc_path"]):
@@ -250,7 +271,7 @@ def run_all(agent: Agent, tmp: str) -> None:
     time.sleep(0.4)
     agent.ok("signal", pid=res["pid"], signal="KILL")
     time.sleep(0.4)
-    check("group is gone after SIGKILL", not os.path.exists("/proc/%d" % res["pid"]))
+    check("group is gone after SIGKILL", not pid_alive(res["pid"]))
 
     print("\n== upload / download 分块 ==")
     blob = os.urandom(700_000)  # 跨过 512KiB 分块边界
