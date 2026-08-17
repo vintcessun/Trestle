@@ -27,12 +27,16 @@ jobs:
             os: windows-latest
             target: x86_64-pc-windows-msvc
             archive: zip
+          # 在 22.04 上编，不是 ubuntu-latest。
+          # latest 现在是 24.04，产出的二进制要 GLIBC_2.39，装到 Ubuntu 22.04
+          # （还在维护期的 LTS）上直接 "version `GLIBC_2.39' not found"。
+          # glibc 只向后兼容：在旧的上编能在新的上跑，反过来不行。
           - name: linux-x86_64
-            os: ubuntu-latest
+            os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             archive: tar
           - name: linux-aarch64
-            os: ubuntu-24.04-arm
+            os: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
             archive: tar
           - name: macos-aarch64
@@ -126,7 +130,10 @@ jobs:
           cp README.md README_zh.md "$out/"
           mkdir -p "$out/skills"
           cp -r .claude/skills/trestle "$out/skills/trestle"
-          cp scripts/install.ps1 "$out/" 2>/dev/null || true
+          # 两个都要：Linux/macOS 的包里只放 install.ps1 等于没给安装脚本。
+          cp scripts/install.ps1 "$out/"
+          cp scripts/install.sh "$out/"
+          chmod +x "$out/install.sh"
 
           cat > "$out/GETTING-STARTED.txt" <<'EOF'
           Trestle — 装好之后怎么用 / getting started
@@ -199,8 +206,13 @@ jobs:
           Windows 上也可以直接跑 `install.ps1 -Register`，Linux / macOS 跑
           `install.sh --register`：装好目录、放进 PATH、注册给 Claude Code 与 Codex。
 
-          > Windows 与 Linux 都跑过完整的离线测试套件；连真实服务器的那部分
-          > 只在 Windows 上验证过。macOS 的包由 CI 构建并跑离线测试，没有手工验证。
+          Linux 包在 Ubuntu 22.04 上编译，需要 glibc 2.35 或更新
+          （Ubuntu 22.04+ / Debian 12+）。二进制没有签名，macOS 首次运行会被
+          Gatekeeper 拦，`xattr -d com.apple.quarantine <文件>` 即可。
+
+          > Windows 与 Linux 都跑过完整的离线测试套件，发布包也在两边解压运行过；
+          > 连真实服务器的那部分只在 Windows 上验证过。macOS 的包由 CI 构建并跑
+          > 离线测试，没有手工验证。
           NOTES
           # 必须给 --repo：这个 job 只下载产物、**不 checkout 代码**，没有 .git，
           # gh 推断不出该往哪个仓库发，会直接 "fatal: not a git repository" 退出。
