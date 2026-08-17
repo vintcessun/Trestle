@@ -26,6 +26,15 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 AGENT = os.path.join(HERE, "trestle_agent.py")
 
+# Windows 控制台默认是 cp1252 / GBK，打中文直接 UnicodeEncodeError。
+# 而这份脚本里唯一一条**专门写给 Windows 用户**的提示就是「请去 WSL 跑」——
+# 它原本会崩在自己那句话上，退出码还不是它想返回的那个。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
+
 
 def pid_alive(pid):
     """这个 pid 现在还在不在。
