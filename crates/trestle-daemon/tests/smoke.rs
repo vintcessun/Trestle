@@ -43,11 +43,25 @@ fn home() -> PathBuf {
         ));
         let _ = std::fs::create_dir_all(&dir);
         let _ = std::fs::copy(source.join("secrets.toml"), dir.join("secrets.toml"));
+
+        // 配置优先用你自己的 `trestle.toml`，没有就退到样例。
+        //
+        // CI 上**一定**没有 `trestle.toml`——它是 gitignore 的机器清单。
+        // 之前这里是 `if let Ok(...)`，读不到就悄悄什么都不做，于是临时 home
+        // 里一个配置文件都没有，daemon 起来时零台机器，凡是断言「有 connector」
+        // 的测试全挂。而 `ConfigStore` 自己的样例兜底救不了：它在 **home 目录**
+        // 里找样例，而这里的 home 是临时目录。
+        let raw = std::fs::read_to_string(source.join("trestle.toml"))
+            .or_else(|_| std::fs::read_to_string(source.join("trestle.example.toml")))
+            .unwrap_or_else(|e| {
+                panic!(
+                    "no trestle.toml or trestle.example.toml in {}: {e}",
+                    source.display()
+                )
+            });
         // 把 idle 超时压短：测试结束后没人管这个 daemon，让它自己走。
-        if let Ok(raw) = std::fs::read_to_string(source.join("trestle.toml")) {
-            let raw = raw.replace("idle_timeout_secs = 1800", "idle_timeout_secs = 90");
-            let _ = std::fs::write(dir.join("trestle.toml"), raw);
-        }
+        let raw = raw.replace("idle_timeout_secs = 1800", "idle_timeout_secs = 90");
+        std::fs::write(dir.join("trestle.toml"), raw).expect("write the test config");
         // SAFETY: 在任何测试跑起来之前设置，之后只读。
         unsafe { std::env::set_var("TRESTLE_PLUGINS", repo_root().join("plugins")) };
         dir
