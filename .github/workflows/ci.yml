@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # CI 机器慢，增量编译的缓存又跨不了 job，关掉省时间
+  CARGO_INCREMENTAL: 0
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  # 最便宜的检查放最前面：泄密和格式都不需要编译，几秒就能给出答复。
+  hygiene:
+    name: 卫生检查
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      # 这个仓库将来要公开，而个人基础设施信息已经漏进来过两次。
+      - name: 有没有个人信息混进来
+        shell: pwsh
+        run: ./scripts/check-public.ps1
+
+      - name: 格式
+        run: cargo fmt --all -- --check
+
+  test:
+    name: 测试 (${{ matrix.os }})
+    needs: hygiene
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: wasm32-wasip2
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
+
+      # 插件是测试的输入，不是产物：host 装不上插件就起不来，测试也就跑不了。
+      - name: 编插件到 wasm
+        shell: bash
+        run: |
+          set -euo pipefail
+          for manifest in $(find plugins -name manifest.toml -not -path '*/templates/*'); do
+            dir=$(dirname "$manifest")
+            name=$(sed -n 's/^name *= *"\(.*\)"/\1/p' "$manifest" | head -1)
+            # Python 插件要 componentize-py，CI 上不装——它不参与这里的断言。
+            if [ -f "$dir/app.py" ]; then
+              echo "skip $name (python plugin, needs componentize-py)"
+              continue
+            fi
+            echo "building $name"
+            (cd "$dir" && cargo build --release --target wasm32-wasip2)
+            cp "$dir/target/wasm32-wasip2/release/${name//-/_}.wasm" "$dir/$name.wasm"
+          done
+
+      - name: clippy
+        run: cargo clippy --workspace --all-targets
+
+      # 真调测试全部 #[ignore]，所以这里跑的是不碰网络的那部分。
+      - name: 测试
+        run: cargo test --workspace
+
+      - name: 远端 agent 协议
+        shell: bash
+        run: python3 agent-py/test_agent.py

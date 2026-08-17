@@ -164,11 +164,7 @@ impl<T: Send + Sync + 'static> InstancePool<T> {
     ///
     /// 一次只收一个，所以从 8 收回 1 要走 7 次巡检——这就是「线性递减」。
     pub fn sweep(&self) -> usize {
-        let idle = self
-            .last_contention
-            .lock()
-            .expect("pool clock")
-            .elapsed();
+        let idle = self.last_contention.lock().expect("pool clock").elapsed();
         if idle < Duration::from_secs(self.policy.idle_secs) {
             return 0;
         }
@@ -205,10 +201,7 @@ impl<T: Send + Sync + 'static> InstancePool<T> {
 
     /// 当前空闲了多久（离上次「所有实例都忙」有多远）。
     pub fn idle(&self) -> Duration {
-        self.last_contention
-            .lock()
-            .expect("pool clock")
-            .elapsed()
+        self.last_contention.lock().expect("pool clock").elapsed()
     }
 
     fn free_one(&self) -> Option<Arc<T>> {
@@ -269,7 +262,9 @@ mod tests {
     async fn a_pool_starts_with_exactly_one_instance() {
         // 从 1 起是策略的一半：绝大多数插件永远不会被并发调用。
         let (f, made) = counting_factory();
-        let pool = InstancePool::new("t", f, PoolPolicy::default()).await.unwrap();
+        let pool = InstancePool::new("t", f, PoolPolicy::default())
+            .await
+            .unwrap();
         assert_eq!(pool.size(), 1);
         assert_eq!(made.load(Ordering::SeqCst), 1);
     }

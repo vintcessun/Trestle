@@ -266,10 +266,7 @@ impl Runtime {
         let policy = if loaded.manifest.capabilities.stateless {
             policy
         } else {
-            PoolPolicy {
-                max: 1,
-                ..policy
-            }
+            PoolPolicy { max: 1, ..policy }
         };
         let name = loaded.manifest.name.clone();
         let runtime = Arc::clone(self);

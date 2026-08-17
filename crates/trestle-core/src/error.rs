@@ -181,7 +181,11 @@ mod tests {
     fn unknown_target_lists_all_known_names_sorted() {
         let err = TrestleError::unknown_target(
             "x36",
-            ["gpu-4".to_string(), "gpu-1".to_string(), "gpu-2".to_string()],
+            [
+                "gpu-4".to_string(),
+                "gpu-1".to_string(),
+                "gpu-2".to_string(),
+            ],
         );
         assert_eq!(
             err.to_string(),

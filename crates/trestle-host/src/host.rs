@@ -139,7 +139,8 @@ impl TrestleHost {
 
             // 池随时可能自己再长一个实例出来，所以造 state 这件事得留成一个
             // 能反复调的闭包——而且只能捕获 Arc，不能借 `self`。
-            let (fleet, arbiter, tools_ref) = (Arc::clone(fleet), Arc::clone(arbiter), Arc::clone(tools));
+            let (fleet, arbiter, tools_ref) =
+                (Arc::clone(fleet), Arc::clone(arbiter), Arc::clone(tools));
             let (events, tasks, ws) = (
                 Arc::clone(&self.events),
                 Arc::clone(&self.opts_tasks),

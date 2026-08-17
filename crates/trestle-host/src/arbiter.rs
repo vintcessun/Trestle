@@ -108,7 +108,10 @@ impl Arbiter {
             !(all_idle && now_ms.saturating_sub(c.at_ms) > STALE_MS)
         });
 
-        let taken: Vec<&str> = mine.iter().flat_map(|c| c.units.iter().map(String::as_str)).collect();
+        let taken: Vec<&str> = mine
+            .iter()
+            .flat_map(|c| c.units.iter().map(String::as_str))
+            .collect();
         let free: Vec<&Unit> = snapshot
             .iter()
             .filter(|u| !u.busy && !taken.contains(&u.id.as_str()))
@@ -151,7 +154,11 @@ impl Arbiter {
         let claim = Claim {
             id: format!("c{}", self.next.fetch_add(1, Ordering::Relaxed) + 1),
             pool: pool.to_string(),
-            units: free.into_iter().take(want as usize).map(|u| u.id.clone()).collect(),
+            units: free
+                .into_iter()
+                .take(want as usize)
+                .map(|u| u.id.clone())
+                .collect(),
             purpose: purpose.to_string(),
             agent: agent.to_string(),
             job_id: None,
@@ -190,7 +197,12 @@ impl Arbiter {
     }
 
     pub async fn claims_of(&self, pool: &str) -> Vec<Claim> {
-        self.claims.lock().await.get(pool).cloned().unwrap_or_default()
+        self.claims
+            .lock()
+            .await
+            .get(pool)
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// 全部占用，按池分组。Web UI 与 `trestle agents` 用它。
@@ -233,8 +245,14 @@ mod tests {
         let a = Arbiter::new();
         let snap = units(&[("0", false), ("1", false), ("2", false), ("3", false)]);
 
-        let first = a.acquire("gpu-4/gpu", &snap, 2, "job one", "agent-a", 0).await.unwrap();
-        let second = a.acquire("gpu-4/gpu", &snap, 2, "job two", "agent-b", 0).await.unwrap();
+        let first = a
+            .acquire("gpu-4/gpu", &snap, 2, "job one", "agent-a", 0)
+            .await
+            .unwrap();
+        let second = a
+            .acquire("gpu-4/gpu", &snap, 2, "job two", "agent-b", 0)
+            .await
+            .unwrap();
 
         assert_eq!(first.units.len(), 2);
         assert_eq!(second.units.len(), 2);
@@ -248,7 +266,10 @@ mod tests {
         // 别人绕过 Trestle 直接 ssh 上去占的卡——判据是真实世界，不是我们的表。
         let a = Arbiter::new();
         let snap = units(&[("0", true), ("1", true), ("2", false)]);
-        let claim = a.acquire("gpu-4/gpu", &snap, 1, "job", "agent", 0).await.unwrap();
+        let claim = a
+            .acquire("gpu-4/gpu", &snap, 1, "job", "agent", 0)
+            .await
+            .unwrap();
         assert_eq!(claim.units, ["2"]);
     }
 
@@ -257,7 +278,9 @@ mod tests {
         // 「失败」这两个字对 agent 没有用：它要知道下一步该等谁。
         let a = Arbiter::new();
         let snap = units(&[("0", false), ("1", true), ("2", false)]);
-        a.acquire("gpu-4/gpu", &snap, 2, "training run", "agent-a", 0).await.unwrap();
+        a.acquire("gpu-4/gpu", &snap, 2, "training run", "agent-a", 0)
+            .await
+            .unwrap();
 
         let err = a
             .acquire("gpu-4/gpu", &snap, 2, "another run", "agent-b", 0)
@@ -277,11 +300,22 @@ mod tests {
     async fn releasing_puts_the_units_back() {
         let a = Arbiter::new();
         let snap = units(&[("0", false), ("1", false)]);
-        let claim = a.acquire("gpu-4/gpu", &snap, 2, "job", "agent", 0).await.unwrap();
-        assert!(a.acquire("gpu-4/gpu", &snap, 1, "next", "agent", 0).await.is_err());
+        let claim = a
+            .acquire("gpu-4/gpu", &snap, 2, "job", "agent", 0)
+            .await
+            .unwrap();
+        assert!(
+            a.acquire("gpu-4/gpu", &snap, 1, "next", "agent", 0)
+                .await
+                .is_err()
+        );
 
         a.release(&claim.id).await;
-        assert!(a.acquire("gpu-4/gpu", &snap, 2, "next", "agent", 0).await.is_ok());
+        assert!(
+            a.acquire("gpu-4/gpu", &snap, 2, "next", "agent", 0)
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]
@@ -289,11 +323,18 @@ mod tests {
         // 释放绑在 job 生命周期上，不绑在时间上。
         let a = Arbiter::new();
         let snap = units(&[("0", false), ("1", false)]);
-        let claim = a.acquire("gpu-4/gpu", &snap, 2, "job", "agent", 0).await.unwrap();
+        let claim = a
+            .acquire("gpu-4/gpu", &snap, 2, "job", "agent", 0)
+            .await
+            .unwrap();
         a.bind_job(&claim.id, "train-1").await;
 
         a.release_job("train-2").await;
-        assert_eq!(a.claims_of("gpu-4/gpu").await.len(), 1, "wrong job released");
+        assert_eq!(
+            a.claims_of("gpu-4/gpu").await.len(),
+            1,
+            "wrong job released"
+        );
         a.release_job("train-1").await;
         assert!(a.claims_of("gpu-4/gpu").await.is_empty());
     }
@@ -304,14 +345,26 @@ mod tests {
         // 那一刻恰好有一份新鲜快照，也恰好有人在等。
         let a = Arbiter::new();
         let snap = units(&[("0", false), ("1", false)]);
-        a.acquire("gpu-4/gpu", &snap, 2, "job that died", "agent", 0).await.unwrap();
+        a.acquire("gpu-4/gpu", &snap, 2, "job that died", "agent", 0)
+            .await
+            .unwrap();
 
         // 还在宽限期内：不动它。刚分到卡、还在装环境的窗口是真实存在的。
-        assert!(a.acquire("gpu-4/gpu", &snap, 1, "next", "agent", STALE_MS).await.is_err());
+        assert!(
+            a.acquire("gpu-4/gpu", &snap, 1, "next", "agent", STALE_MS)
+                .await
+                .is_err()
+        );
         // 过了宽限期：收掉。
-        let ok = a.acquire("gpu-4/gpu", &snap, 2, "next", "agent", STALE_MS + 1).await;
+        let ok = a
+            .acquire("gpu-4/gpu", &snap, 2, "next", "agent", STALE_MS + 1)
+            .await;
         assert!(ok.is_ok(), "{:?}", ok.err().map(|e| e.to_string()));
-        assert_eq!(a.claims_of("gpu-4/gpu").await.len(), 1, "the dead claim should be gone");
+        assert_eq!(
+            a.claims_of("gpu-4/gpu").await.len(),
+            1,
+            "the dead claim should be gone"
+        );
     }
 
     #[tokio::test]
@@ -319,7 +372,9 @@ mod tests {
         // 卡上真的有活 = 任务还在跑。跑三天也不该被收。
         let a = Arbiter::new();
         let claim_snap = units(&[("0", false), ("1", false)]);
-        a.acquire("gpu-4/gpu", &claim_snap, 2, "long training", "agent", 0).await.unwrap();
+        a.acquire("gpu-4/gpu", &claim_snap, 2, "long training", "agent", 0)
+            .await
+            .unwrap();
 
         let now_busy = units(&[("0", true), ("1", true)]);
         let err = a
@@ -333,9 +388,15 @@ mod tests {
     async fn pools_do_not_see_each_other() {
         let a = Arbiter::new();
         let snap = units(&[("0", false)]);
-        a.acquire("gpu-4/gpu", &snap, 1, "job", "agent", 0).await.unwrap();
+        a.acquire("gpu-4/gpu", &snap, 1, "job", "agent", 0)
+            .await
+            .unwrap();
         // 另一台机器的同名单位是另一个池。
-        assert!(a.acquire("gpu-1/gpu", &snap, 1, "job", "agent", 0).await.is_ok());
+        assert!(
+            a.acquire("gpu-1/gpu", &snap, 1, "job", "agent", 0)
+                .await
+                .is_ok()
+        );
     }
 
     #[test]

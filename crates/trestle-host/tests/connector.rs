@@ -96,7 +96,11 @@ async fn shared(driver: &'static str) -> &'static trestle_host::runtime::Connect
         tokio::sync::OnceCell::const_new();
     static DIRECT: tokio::sync::OnceCell<trestle_host::runtime::ConnectorInstance> =
         tokio::sync::OnceCell::const_new();
-    let cell = if driver == "ssh-direct" { &DIRECT } else { &PROXY };
+    let cell = if driver == "ssh-direct" {
+        &DIRECT
+    } else {
+        &PROXY
+    };
     cell.get_or_init(|| async {
         instantiate(&connector_using(driver), Arc::new(Collector::default())).await
     })
@@ -238,7 +242,9 @@ async fn the_config_is_what_carries_the_start_command() {
     // trestle.toml，也可能是 clone 下来只有样例。名字对不对由下面那条
     // 「check 和 start 说的是同一个东西」来管。
     let store = config_store();
-    let lab = store.connector_section(&connector_using("ssh-socks5")).expect("section");
+    let lab = store
+        .connector_section(&connector_using("ssh-socks5"))
+        .expect("section");
     assert_eq!(lab.plugin, "ssh-socks5");
     assert!(
         lab.allow_exec.iter().any(|p| p == "docker"),
@@ -260,7 +266,9 @@ async fn the_config_is_what_carries_the_start_command() {
     assert_eq!(expect, container, "check_expect and start disagree");
     let check = ready["check"].as_array().expect("ready.check");
     assert!(
-        check.iter().any(|v| v.as_str().unwrap_or("").contains(container)),
+        check
+            .iter()
+            .any(|v| v.as_str().unwrap_or("").contains(container)),
         "check does not mention {container}: {check:?}"
     );
     // 「不存在时怎么办」必须给出创建命令——报错却不说下一步，等于没报。
@@ -268,7 +276,9 @@ async fn the_config_is_what_carries_the_start_command() {
     assert!(remedy.contains("docker run"), "{remedy}");
 
     // 直连那一组没有前置条件，所以也不该有任何本机命令的授权。
-    let mine = store.connector_section(&connector_using("ssh-direct")).expect("section");
+    let mine = store
+        .connector_section(&connector_using("ssh-direct"))
+        .expect("section");
     assert_eq!(mine.plugin, "ssh-direct");
     assert!(mine.allow_exec.is_empty(), "{:?}", mine.allow_exec);
     assert!(mine.settings.get("ready").is_none());

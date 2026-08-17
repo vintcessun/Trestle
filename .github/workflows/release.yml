@@ -1,0 +1,179 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "打一个测试用的版本名（不会创建 release）"
+        required: false
+        default: "dev"
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+          - name: linux-x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar
+          - name: linux-aarch64
+            os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            archive: tar
+          - name: macos-aarch64
+            os: macos-latest
+            target: aarch64-apple-darwin
+            archive: tar
+          - name: macos-x86_64
+            os: macos-latest
+            target: x86_64-apple-darwin
+            archive: tar
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}, wasm32-wasip2
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: 编三个二进制
+        shell: bash
+        run: cargo build --release --target ${{ matrix.target }} --bin trestled --bin trestle --bin trestle-mcp
+
+      # 插件是 wasm，和目标平台无关——但每个 job 都得有一份，
+      # 因为发布包必须是自包含的。
+      - name: 编插件到 wasm
+        shell: bash
+        run: |
+          set -euo pipefail
+          for manifest in $(find plugins -name manifest.toml -not -path '*/templates/*'); do
+            dir=$(dirname "$manifest")
+            name=$(sed -n 's/^name *= *"\(.*\)"/\1/p' "$manifest" | head -1)
+            if [ -f "$dir/app.py" ]; then
+              echo "skip $name (python plugin, needs componentize-py)"
+              continue
+            fi
+            (cd "$dir" && cargo build --release --target wasm32-wasip2)
+            cp "$dir/target/wasm32-wasip2/release/${name//-/_}.wasm" "$dir/$name.wasm"
+          done
+
+      # 发布包的形状必须和 install.ps1 装出来的一样：三个二进制、插件、
+      # 样例配置全在一个目录里。trestle-mcp 要在自己旁边找到 trestled，
+      # 散着放这条链就断了。
+      - name: 打包
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME:-dev}"
+          out="trestle-${version}-${{ matrix.name }}"
+          mkdir -p "$out/plugins"
+
+          ext=""
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then ext=".exe"; fi
+          for bin in trestled trestle trestle-mcp; do
+            cp "target/${{ matrix.target }}/release/${bin}${ext}" "$out/"
+          done
+
+          for manifest in $(find plugins -name manifest.toml -not -path '*/templates/*'); do
+            dir=$(dirname "$manifest")
+            name=$(sed -n 's/^name *= *"\(.*\)"/\1/p' "$manifest" | head -1)
+            [ -f "$dir/$name.wasm" ] || continue
+            kind=$(basename "$(dirname "$dir")")
+            mkdir -p "$out/plugins/$kind/$name"
+            cp "$manifest" "$out/plugins/$kind/$name/"
+            cp "$dir/$name.wasm" "$out/plugins/$kind/$name/"
+          done
+          cp -r plugins/templates "$out/plugins/templates"
+
+          cp config/trestle.example.toml config/secrets.example.toml "$out/"
+          cp README.md README_zh.md "$out/"
+          mkdir -p "$out/skills"
+          cp -r .claude/skills/trestle "$out/skills/trestle"
+          cp scripts/install.ps1 "$out/" 2>/dev/null || true
+
+          cat > "$out/GETTING-STARTED.txt" <<'EOF'
+          Trestle — 装好之后怎么用 / getting started
+
+          1. 复制样例配置，填上你自己的机器与凭据：
+                 cp trestle.example.toml trestle.toml
+                 cp secrets.example.toml secrets.toml
+
+          2. 注册给你的 agent（把 <dir> 换成这个目录的绝对路径）：
+                 claude mcp add trestle -s user -e TRESTLE_AGENT=claude-code -- <dir>/trestle-mcp
+                 codex  mcp add trestle    --env TRESTLE_AGENT=codex        -- <dir>/trestle-mcp
+
+          3. Claude Code 还可以装上 skill（可选，讲怎么用好这些工具）：
+                 cp -r skills/trestle ~/.claude/skills/trestle
+
+          4. 自己看一眼：
+                 ./trestle targets
+                 ./trestle doctor
+
+          注意：这三个二进制**必须待在同一个目录**——trestle-mcp 要在自己旁边
+          找到 trestled 才能把 daemon 拉起来，配置与插件默认也在这里找。
+
+          第一次调用会慢一点：daemon 要把全部插件编译一遍并缓存下来。
+          EOF
+
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            7z a -tzip "$out.zip" "$out" >/dev/null
+          else
+            tar czf "$out.tar.gz" "$out"
+          fi
+          ls -la trestle-*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: |
+            trestle-*.zip
+            trestle-*.tar.gz
+          if-no-files-found: error
+
+  release:
+    name: 发布
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: 看一眼收到了什么
+        run: ls -la artifacts
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
+          body: |
+            每个包都是**自包含**的：三个二进制、全部插件、样例配置。
+            解压之后照着 `GETTING-STARTED.txt` 走。
+
+            Windows 上也可以直接跑 `install.ps1 -Register`，它会把目录装好
+            并注册给 Claude Code 与 Codex。
+
+            > 目前只在 Windows 上做过真机验证。Linux 与 macOS 的包由 CI 构建，
+            > 离线测试在这三个平台上都跑过，但连真实服务器那部分没有。

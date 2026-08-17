@@ -185,9 +185,8 @@ async fn run(cli: Cli) -> trestle_core::Result<()> {
     {
         let host = Arc::clone(&host);
         tokio::spawn(async move {
-            let mut tick = tokio::time::interval(Duration::from_secs(
-                trestle_host::pool::SWEEP_INTERVAL_SECS,
-            ));
+            let mut tick =
+                tokio::time::interval(Duration::from_secs(trestle_host::pool::SWEEP_INTERVAL_SECS));
             loop {
                 tick.tick().await;
                 let reclaimed = host.sweep_pools().await;

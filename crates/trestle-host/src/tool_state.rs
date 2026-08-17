@@ -8,11 +8,11 @@ use std::sync::Arc;
 
 use trestle_core::{Result, TrestleError};
 
+use crate::arbiter::Arbiter;
 use crate::bindings::trestle::plugin::types::{Error, ErrorKind, TargetInfo};
 use crate::bindings_tool::trestle::plugin::{arbiter, base, plugins, tasks, ws};
 use crate::capability::{Capabilities, Manifest};
 use crate::fleet::Fleet;
-use crate::arbiter::Arbiter;
 use crate::state::{EventSink, PluginKv, sandboxed_wasi};
 
 /// 周期任务的登记处。真正的定时器在 daemon 里，这里只记「谁要什么时候被叫醒」。

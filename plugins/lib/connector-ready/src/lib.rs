@@ -295,7 +295,10 @@ fn first_line<'a>(primary: &'a str, fallback: &'a str) -> &'a str {
     } else {
         primary
     };
-    pick.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim()
+    pick.lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("")
+        .trim()
 }
 
 fn escape(s: &str) -> String {
@@ -321,7 +324,11 @@ mod tests {
     impl Sys for Mock {
         fn probe_tcp(&self, _addr: &str, _timeout_ms: u32) -> bool {
             let mut p = self.probes.borrow_mut();
-            if p.is_empty() { false } else { p.remove(0) }
+            if p.is_empty() {
+                false
+            } else {
+                p.remove(0)
+            }
         }
         fn local_exec(&self, argv: &[String]) -> Result<Exec, ExecError> {
             self.ran.borrow_mut().push(argv.join(" "));
@@ -380,7 +387,10 @@ mod tests {
         };
         let mut cache = Cache::default();
         assert!(ensure(&sys, &lab_config(), &mut cache, "127.0.0.1:11080").is_ok());
-        assert!(sys.ran.borrow().is_empty(), "it should not have run anything");
+        assert!(
+            sys.ran.borrow().is_empty(),
+            "it should not have run anything"
+        );
         assert!(cache.fresh(sys.now_ms()));
     }
 
@@ -465,7 +475,10 @@ mod tests {
         };
         let mut cache = Cache::default();
         let err = ensure(&sys, &lab_config(), &mut cache, "127.0.0.1:11080").unwrap_err();
-        assert!(err.detail.contains("Cannot connect to the Docker daemon"), "{err:?}");
+        assert!(
+            err.detail.contains("Cannot connect to the Docker daemon"),
+            "{err:?}"
+        );
     }
 
     #[test]

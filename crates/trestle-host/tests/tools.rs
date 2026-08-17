@@ -313,7 +313,11 @@ async fn two_agents_asking_for_cards_at_once_get_disjoint_sets() {
     let mut seen = devices.clone();
     seen.sort_unstable();
     seen.dedup();
-    assert_eq!(seen.len(), devices.len(), "两个请求拿到了同一张卡: {devices:?}");
+    assert_eq!(
+        seen.len(),
+        devices.len(),
+        "两个请求拿到了同一张卡: {devices:?}"
+    );
 
     for c in claims {
         h.call_tool("gpu_release", &serde_json::json!({"claim": c}).to_string())
@@ -603,9 +607,14 @@ async fn fleet_status_reports_every_machine_and_groups_by_connector() {
         "targets_list took {elapsed:?} — it must not connect to anything"
     );
     let grouped: serde_json::Value = serde_json::from_str(&listed).unwrap();
-    assert!(grouped.get(proxy_connector().as_str()).is_some(), "{grouped}");
     assert!(
-        grouped.get(connector_using("ssh-direct").as_str()).is_some(),
+        grouped.get(proxy_connector().as_str()).is_some(),
+        "{grouped}"
+    );
+    assert!(
+        grouped
+            .get(connector_using("ssh-direct").as_str())
+            .is_some(),
         "{grouped}"
     );
 

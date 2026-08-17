@@ -166,7 +166,10 @@ mod tests {
 
         // 重开就是 daemon 重启后的情形：状态必须还在。
         let kv = PluginKv::open(&dir, "job");
-        assert_eq!(kv.get("offset:gpu-4:train-1").await.as_deref(), Some("4096"));
+        assert_eq!(
+            kv.get("offset:gpu-4:train-1").await.as_deref(),
+            Some("4096")
+        );
         assert_eq!(kv.list("offset:gpu-4:").await.len(), 2);
 
         let _ = std::fs::remove_dir_all(&dir);

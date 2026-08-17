@@ -319,7 +319,9 @@ mod tests {
         full.extend_from_slice(trailing);
 
         let proxy = tokio::spawn(fake_proxy(server, full));
-        socks5_handshake(&mut client, "203.0.113.1", 22).await.unwrap();
+        socks5_handshake(&mut client, "203.0.113.1", 22)
+            .await
+            .unwrap();
         proxy.await.unwrap();
 
         // 握手结束后流上剩下的第一批字节必须正好是 SSH 横幅。

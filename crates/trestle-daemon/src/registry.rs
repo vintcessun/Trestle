@@ -277,7 +277,10 @@ mod tests {
     async fn a_note_without_an_expiry_is_refused() {
         let reg = AgentRegistry::new(EventBus::new());
         // 没有过期时间的留言板会变成一堆没人清的垃圾，所以 TTL 是必填。
-        let err = reg.put_note("gpu-4", "training", "a1", 0).await.unwrap_err();
+        let err = reg
+            .put_note("gpu-4", "training", "a1", 0)
+            .await
+            .unwrap_err();
         assert!(err.contains("expiry"), "{err}");
     }
 
