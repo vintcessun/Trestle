@@ -187,9 +187,13 @@ async fn the_two_connectors_manage_disjoint_machines() {
 }
 
 #[tokio::test]
-async fn the_real_config_is_what_carries_the_start_command() {
+async fn the_config_is_what_carries_the_start_command() {
     // 拉起代理的那条命令以前写死在驱动里。现在它在配置里，所以这条断言守着
     // 那根线还接着——驱动通用了，但这一组机器仍然知道自己该怎么被叫醒。
+    //
+    // 断言的是**形状**不是那个容器叫什么：容器名是你的，这里跑的可能是你的
+    // trestle.toml，也可能是 clone 下来只有样例。名字对不对由下面那条
+    // 「check 和 start 说的是同一个东西」来管。
     let store = config_store();
     let lab = store.connector_section("gpu-cluster").expect("section");
     assert_eq!(lab.plugin, "ssh-socks5");
@@ -198,11 +202,26 @@ async fn the_real_config_is_what_carries_the_start_command() {
         "allow_exec = {:?}",
         lab.allow_exec
     );
-    let start = lab.settings["ready"]["start"].as_array().expect("start");
-    let start: Vec<&str> = start.iter().map(|v| v.as_str().unwrap()).collect();
-    assert_eq!(start, ["docker", "start", "vpn-proxy"]);
+
+    let ready = &lab.settings["ready"];
+    let start: Vec<&str> = ready["start"]
+        .as_array()
+        .expect("ready.start")
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert_eq!(&start[..2], ["docker", "start"], "{start:?}");
+    // check 找的和 start 拉的必须是同一个东西，否则「它在不在」这一步白做。
+    let container = start[2];
+    let expect = ready["check_expect"].as_str().unwrap_or("");
+    assert_eq!(expect, container, "check_expect and start disagree");
+    let check = ready["check"].as_array().expect("ready.check");
+    assert!(
+        check.iter().any(|v| v.as_str().unwrap_or("").contains(container)),
+        "check does not mention {container}: {check:?}"
+    );
     // 「不存在时怎么办」必须给出创建命令——报错却不说下一步，等于没报。
-    let remedy = lab.settings["ready"]["missing_remedy"].as_str().unwrap();
+    let remedy = ready["missing_remedy"].as_str().unwrap_or("");
     assert!(remedy.contains("docker run"), "{remedy}");
 
     // 直连那一组没有前置条件，所以也不该有任何本机命令的授权。

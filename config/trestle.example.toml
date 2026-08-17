@@ -1,0 +1,161 @@
+# Trestle 配置的样例 —— 统一入口，一个文件。
+#
+#   cp config/trestle.example.toml config/trestle.toml
+#
+# 然后改成你自己的机器。`trestle.toml` 是**你的**文件，已 gitignore：
+# 里面是真实 IP、端口、用户名和工作目录，这四样凑一起就是一份可以直接照着连的
+# 清单，不该进版本库。密码与密钥更进一步，在同目录的 secrets.toml 里（也已 gitignore）。
+#
+# 这个样例里的地址都是 RFC 5737 的文档保留段（203.0.113.x / 198.51.100.x），
+# 不可路由，照抄不会连到任何真实机器。
+#
+# 核心约定：
+#   * 没有默认机。每次单机操作都必须显式指定 target。
+#   * connector 是集约管理的单位：一台机器归属一个 connector，targets_list 按它分组。
+#   * 机器叫什么名字由这里决定，不由 connector 硬编码。
+
+[daemon]
+# 无客户端连接且无活跃 job 超过这个时间就自行退出；0 = 永不退出
+idle_timeout_secs = 1800
+# IPC 监听。端口 0 = 随机，实际端口与 token 写入同目录的 daemon.json
+ipc_bind = "127.0.0.1:0"
+# Monitor ws 与 Web UI 的 HTTP 服务
+http_bind = "127.0.0.1:0"
+
+# 一个插件最多能有几个 wasm 实例 = 它最多能几路并发。0 = 跟 CPU 核心数走。
+#
+# 池**从 1 个实例起**，撞上并发（所有实例都在被调用）才长，而且是指数长：
+# 1 → 2 → 4 → 8 …。连续 pool_idle_secs 没撞上就开始一个一个收回来。
+# 这样常见情形（一个 agent 顺序调用）不为并发付内存，突发并发也不用排队。
+pool_max = 0
+pool_idle_secs = 600
+
+[defaults]
+# shell 的默认与上限超时（秒）。超过这个时长的活儿应该用 job_start
+shell_timeout_secs = 60
+shell_max_timeout_secs = 300
+chunk_bytes = 524288
+# 目录传输的默认排除
+exclude = ["__pycache__", "*.pyc", ".git", ".venv", "venv", "node_modules",
+           "*.egg-info", ".ipynb_checkpoints", ".DS_Store"]
+
+
+# ============================================================================
+# Connectors —— 「怎么进去」
+#
+# 每个 connector 自己管：连哪些机器、怎么连、长连接怎么维持、断了怎么重试、
+# 远端 agent 怎么部署。上层只看到一个 name 和七个基本操作。
+#
+# `plugin` 是**驱动**（通用的：ssh-socks5 / ssh-direct），配置节的名字才是这一组
+# 机器的称呼。同一个驱动可以被配置成任意多个 connector，各管各的机器、
+# 各有各的状态。想加一组走别的代理的机器？复制一节、改个名字就行，不用写代码。
+# ============================================================================
+
+# 一组要经代理才进得去的机器。
+[connectors.gpu-cluster]
+plugin = "ssh-socks5"
+# ⚠️ 用 11080 而不是 1080：本机 clash/mihomo 常占着 1080，Docker Desktop(WSL2) 发布到
+#    127.0.0.1:1080 会“静默失败”——docker run 返回成功但端口实际不通。
+socks = "127.0.0.1:11080"
+# 准它在**本机**跑什么。驱动是通用的，不知道你的代理是 docker 起的还是别的，
+# 所以这份授权只能你给。⚠️ 本机跑任意命令等于全部权限，这里写的东西要看清楚。
+allow_exec = ["docker"]
+
+# 前置条件：探不通就把代理拉起来。整节不写 = 代理已经在跑，只管连。
+[connectors.gpu-cluster.ready]
+# 探哪个地址。不写就用上面的 socks。
+probe_timeout_ms = 800
+# 先确认容器在不在。输出里必须出现 check_expect，否则算「不存在」。
+check = ["docker", "ps", "-a", "--filter", "name=^vpn-proxy$", "--format", "{{.Names}}"]
+check_expect = "vpn-proxy"
+# **不存在就报错，绝不替你创建。** 容器由你手工建一次，Trestle 只负责叫醒它。
+missing = "代理容器 vpn-proxy 不存在"
+missing_remedy = """手工建一次，之后 Trestle 只会 start 它：
+  docker run -d --name vpn-proxy --restart unless-stopped \\
+    -p 127.0.0.1:11080:1080 --cap-add NET_ADMIN --device /dev/net/tun \\
+    example/vpn-proxy:latest"""
+# 把它叫醒的那条命令。不写 = 探不通就直接报错，不自动拉起。
+start = ["docker", "start", "vpn-proxy"]
+# 容器起来到 SOCKS 真能连上之间有几秒的窗口，等这么久。
+timeout_secs = 40
+# 成功之后多久内不再查 docker。没有它每次拨号都要问一遍。
+cache_secs = 30
+
+# 一组直连就能进去的机器。认证方式由 secrets.toml 里给的是密钥还是密码决定，
+# 不在这里声明——声明一遍而实际由别处决定，只会多一处能说谎的地方。
+[connectors.cloud]
+plugin = "ssh-direct"
+# 没有 [.ready] 一节：直连不需要任何前置条件。
+# 如果哪天这组机器要先拨 VPN，在这里加一节就行，形状和上面完全一样。
+
+
+# ============================================================================
+# Targets —— 机器的拓扑与称呼
+#
+# `note` 会原样交给 agent，所以写「哪个盘满了」「东西该放哪」这类它需要知道、
+# 又不该自己去试出来的事。它同时也是最容易写进敏感信息的地方——这个文件
+# 不入库，但你要是决定分享它，先看一眼这里。
+# ============================================================================
+
+[targets.gpu-1]
+connector = "gpu-cluster"
+host = "203.0.113.10"
+port = 2201
+user = "alice"
+workdir = "/mnt/data/alice/work"
+agent_dir = "~/.trestle"
+aliases = ["node-a", "203.0.113.10"]
+note = """8 × GPU。只有走代理才可达。
+⚠️ 项目盘快满了，别再往那儿写大文件。"""
+
+[targets.gpu-2]
+connector = "gpu-cluster"
+host = "203.0.113.20"
+port = 2202
+user = "alice"
+workdir = "/home/alice/data"
+agent_dir = "~/.trestle"
+aliases = ["dc2", "203.0.113.20"]
+note = """8 × GPU。日常工作目录 /home/alice/data，
+模型 /home/alice/models，数据集 /home/alice/datasets。
+⚠️ 根分区快满了，东西写 workdir 别写 ~。"""
+
+[targets.gpu-3]
+connector = "gpu-cluster"
+host = "203.0.113.30"
+port = 2203
+user = "alice"
+workdir = "/home/alice/data"
+agent_dir = "~/.trestle"
+aliases = ["node-12", "203.0.113.30"]
+note = "8 × GPU，与 gpu-4 同集群。"
+
+[targets.gpu-4]
+connector = "gpu-cluster"
+host = "203.0.113.31"
+port = 2204
+user = "alice"
+workdir = "/home/alice/data"
+agent_dir = "~/.trestle"
+aliases = ["node-16", "203.0.113.31"]
+note = "8 × GPU，与 gpu-3 同集群。盘最宽裕，跑新东西优先考虑这台。"
+
+[targets.web-1]
+connector = "cloud"
+host = "198.51.100.10"
+port = 22
+user = "root"
+workdir = "/root"
+agent_dir = "~/.trestle"
+aliases = ["198.51.100.10"]
+note = "自有服务器（云厂商 A）。root + 公钥登录。"
+
+[targets.web-2]
+connector = "cloud"
+host = "198.51.100.20"
+port = 22
+user = "root"
+workdir = "/root"
+agent_dir = "~/.trestle"
+aliases = ["198.51.100.20"]
+note = "自有服务器（云厂商 B）。root + 公钥登录。"

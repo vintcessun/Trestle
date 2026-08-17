@@ -2,6 +2,12 @@
 config/secrets.toml
 *.pem
 *.key
+
+# 你自己的机器清单 —— 也绝不入库。
+# 真实 IP + 端口 + 用户名 + 工作目录凑一起就是一份可以直接照着连的清单，
+# 缺的只有凭据。样例在 config/trestle.example.toml，复制一份改成你自己的。
+config/trestle.toml
+
 !*.example.*
 
 # Rust

@@ -22,6 +22,8 @@ use crate::target::{Target, TargetRegistry};
 
 pub const CONFIG_FILE: &str = "trestle.toml";
 pub const SECRETS_FILE: &str = "secrets.toml";
+/// 样例配置。`trestle.toml` 不在时的兜底——见 [`ConfigStore::load`]。
+pub const EXAMPLE_CONFIG_FILE: &str = "trestle.example.toml";
 
 // ────────────────────────────── 配置结构 ─────────────────────────────
 
@@ -269,6 +271,8 @@ pub struct ConfigStore {
     root: PathBuf,
     config: Config,
     secrets: Secrets,
+    /// 真配置不在，用的是样例。调用方该说一声——样例里的机器连不上。
+    from_example: bool,
 }
 
 impl ConfigStore {
@@ -288,15 +292,37 @@ impl ConfigStore {
             .unwrap_or_else(|| PathBuf::from("."))
     }
 
+    /// 读配置。`trestle.toml` 不在就退到 `trestle.example.toml`。
+    ///
+    /// 这个兜底不是给用户的便利，是给**新 clone** 的：`trestle.toml` 是你自己的
+    /// 机器清单，已 gitignore，没有它的话 clone 下来连 `cargo test` 都跑不了。
+    /// 退到样例之后 [`Self::from_example`] 为真，daemon 会在启动时说一声——
+    /// 样例里的地址是 RFC 5737 文档保留段，连不上任何东西，**静默**用它才是坑。
     pub fn load(root: impl Into<PathBuf>) -> Result<Self> {
         let root = root.into();
-        let config = Self::read_toml(&root.join(CONFIG_FILE))?.unwrap_or_default();
+        let mut from_example = false;
+        let config = match Self::read_toml(&root.join(CONFIG_FILE))? {
+            Some(c) => c,
+            None => match Self::read_toml(&root.join(EXAMPLE_CONFIG_FILE))? {
+                Some(c) => {
+                    from_example = true;
+                    c
+                }
+                None => Config::default(),
+            },
+        };
         let secrets = Self::read_toml(&root.join(SECRETS_FILE))?.unwrap_or_default();
         Ok(Self {
             root,
             config,
             secrets,
+            from_example,
         })
+    }
+
+    /// 现在跑的是样例配置吗。
+    pub fn from_example(&self) -> bool {
+        self.from_example
     }
 
     fn read_toml<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>> {
@@ -462,6 +488,7 @@ mod tests {
             root: PathBuf::from("."),
             config,
             secrets: Secrets::default(),
+            from_example: false,
         };
         let err = store.targets().unwrap_err();
         let msg = err.to_string();
@@ -487,6 +514,34 @@ mod tests {
         assert!(c.enabled);
         // host 不解释这些字段，原样交给插件。
         assert_eq!(c.settings["socks"].as_str(), Some("127.0.0.1:11080"));
+    }
+
+    #[test]
+    fn a_fresh_clone_falls_back_to_the_example_and_admits_it() {
+        // trestle.toml 是用户自己的机器清单，不入库。所以 clone 下来只有样例——
+        // 兜底读它，但必须**说出来**：样例里的地址是 RFC 5737 文档保留段，
+        // 静默用它会让人对着一堆连不上的机器查半天网络。
+        let dir = std::env::temp_dir().join("trestle-example-fallback");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(EXAMPLE_CONFIG_FILE),
+            "[targets.demo]\nconnector = \"c\"\nhost = \"203.0.113.1\"\nport = 22\n\
+             user = \"alice\"\n\n[connectors.c]\nplugin = \"ssh-direct\"\n",
+        )
+        .unwrap();
+
+        let store = ConfigStore::load(&dir).unwrap();
+        assert!(store.from_example());
+        assert!(store.config().targets.contains_key("demo"));
+
+        // 真配置一在，样例就完全不参与。
+        std::fs::write(dir.join(CONFIG_FILE), "[targets]\n").unwrap();
+        let store = ConfigStore::load(&dir).unwrap();
+        assert!(!store.from_example());
+        assert!(store.config().targets.is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

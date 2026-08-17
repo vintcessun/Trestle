@@ -275,8 +275,8 @@ mod tests {
 
         let request = proxy.await.unwrap();
         assert_eq!(&request[..4], &[0x05, 0x01, 0x00, 0x01]);
-        assert_eq!(&request[4..8], &[59, 77, 5, 59]);
-        assert_eq!(&request[8..10], &2222u16.to_be_bytes());
+        assert_eq!(&request[4..8], &[203, 0, 113, 10]);
+        assert_eq!(&request[8..10], &2201u16.to_be_bytes());
     }
 
     #[tokio::test]

@@ -90,6 +90,15 @@ async fn run(cli: Cli) -> trestle_core::Result<()> {
     }
 
     let store = Arc::new(ConfigStore::load(&root)?);
+    if store.from_example() {
+        // 样例里的地址是 RFC 5737 文档保留段，一台都连不上。静默跑下去的话
+        // 每一次操作都会超时，而人会去查网络而不是查配置。
+        tracing::warn!(
+            root = %root.display(),
+            "no trestle.toml here — running on trestle.example.toml, whose machines are \
+             documentation addresses and will not connect. Copy it to trestle.toml and edit it."
+        );
+    }
     std::fs::create_dir_all(store.state_dir()).ok();
 
     let bus = EventBus::new();
