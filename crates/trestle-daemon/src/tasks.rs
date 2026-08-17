@@ -68,7 +68,7 @@ impl TaskScheduler {
                     let name = t.name.clone();
                     let payload = t.payload.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = loaded.instance.on_tick(&name, &payload).await {
+                        if let Err(e) = loaded.pool.any().on_tick(&name, &payload).await {
                             tracing::warn!(task = %name, %e, "a scheduled task failed");
                         }
                     });

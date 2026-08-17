@@ -26,6 +26,8 @@ pub struct TrestleHost {
     runtime: Arc<Runtime>,
     opts_tasks: Arc<dyn TaskSink>,
     opts_ws: Arc<dyn WsHub>,
+    /// 每个池起几个实例。热加载要复用同一个值。
+    pool_size: usize,
 }
 
 pub struct HostOptions {
@@ -73,6 +75,7 @@ impl TrestleHost {
             runtime: Arc::clone(&runtime),
             opts_tasks: Arc::clone(&opts.tasks),
             opts_ws: Arc::clone(&opts.ws),
+            pool_size: opts.pool_size,
         };
         host.load_tools().await?;
         Ok(host)
@@ -106,35 +109,40 @@ impl TrestleHost {
                 .map(|v| serde_json::to_string(v).unwrap_or_else(|_| "{}".into()))
                 .unwrap_or_else(|| "{}".into());
 
-            let state = ToolState::new(
-                loaded.manifest.clone(),
-                Arc::clone(fleet),
-                Arc::clone(gpu),
-                Arc::new(PluginKv::open(&store.state_dir(), &name)),
-                Arc::clone(&self.events),
-                Arc::clone(&self.opts_tasks),
-                Arc::clone(&self.opts_ws),
-                Arc::clone(tools),
-                config_json,
-            );
+            // KV 在池里的实例之间**共享**：插件的跨调用状态该在这里，
+            // 而不是在 wasm 内存里（那样池化会让实例各看各的）。
+            let kv = Arc::new(PluginKv::open(&store.state_dir(), &name));
+            let make_state = || {
+                ToolState::new(
+                    loaded.manifest.clone(),
+                    Arc::clone(fleet),
+                    Arc::clone(gpu),
+                    Arc::clone(&kv),
+                    Arc::clone(&self.events),
+                    Arc::clone(&self.opts_tasks),
+                    Arc::clone(&self.opts_ws),
+                    Arc::clone(tools),
+                    config_json.clone(),
+                )
+            };
 
-            let instance = runtime
-                .instantiate_tool(&loaded, state)
+            let pool = runtime
+                .instantiate_tool_pool(&loaded, make_state, self.pool_size)
                 .await
                 .map_err(|e| TrestleError::Config {
                     path: dir.display().to_string(),
                     detail: format!("{e:#}"),
                 })?;
-            let instance = Arc::new(instance);
+            let pool = Arc::new(pool);
 
             // 声明与实例化分离：`list-tools` 读一次就进注册表，工具因此立刻可见。
-            let raw = instance.list_tools().await?;
+            let raw = pool.any().list_tools().await?;
             let descriptors = parse_descriptors(&name, &raw)?;
             tools
                 .register(LoadedTool {
                     manifest: loaded.manifest,
                     tools: descriptors,
-                    instance,
+                    pool,
                 })
                 .await?;
         }
@@ -173,7 +181,7 @@ impl TrestleHost {
             let Some(loaded) = self.tools.instance_of(&name).await else {
                 continue;
             };
-            match loaded.instance.ui_panel().await {
+            match loaded.pool.any().ui_panel().await {
                 Ok(html) if !html.trim().is_empty() => out.push((name, html)),
                 Ok(_) => {}
                 Err(e) => {

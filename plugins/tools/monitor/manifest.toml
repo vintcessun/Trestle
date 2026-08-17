@@ -6,3 +6,6 @@ description = "把一个 WebSocket URL 交给 Claude Code 的 Monitor"
 [capabilities]
 # 唯一需要的权限：开 ws 端点。
 ws = true
+# 无状态：开完 ws 端点就完事，端点归 host 管。
+stateless = true
+

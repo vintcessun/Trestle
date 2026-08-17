@@ -7,3 +7,6 @@ description = "长任务管理：起、列、读日志、等、停"
 # 这里只需要额外声明一件事：向 GPU 分配器要卡。
 [capabilities]
 gpu = true
+# job 的状态（任务表、日志偏移量）全在 host KV 里，wasm 内存里什么都不留。
+stateless = true
+

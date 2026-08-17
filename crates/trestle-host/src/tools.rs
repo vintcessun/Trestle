@@ -13,7 +13,7 @@ use tokio::sync::Mutex;
 use trestle_core::{Result, TrestleError};
 
 use crate::capability::Manifest;
-use crate::runtime::ToolInstance;
+use crate::runtime::ToolPool;
 
 /// 一个工具的对外声明。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -30,7 +30,8 @@ pub struct ToolDescriptor {
 pub struct LoadedTool {
     pub manifest: Manifest,
     pub tools: Vec<ToolDescriptor>,
-    pub instance: Arc<ToolInstance>,
+    /// 实例池。声明了 `stateless` 的插件有多个实例，否则只有一个。
+    pub pool: Arc<ToolPool>,
 }
 
 #[derive(Default)]
@@ -105,7 +106,7 @@ impl ToolRegistry {
                 path: "plugins".into(),
                 detail: format!("plugin '{plugin}' is not loaded"),
             })?;
-        loaded.instance.call(tool, args).await
+        loaded.pool.pick().call(tool, args).await
     }
 
     pub async fn instance_of(&self, plugin: &str) -> Option<Arc<LoadedTool>> {

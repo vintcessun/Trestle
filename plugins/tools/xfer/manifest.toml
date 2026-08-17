@@ -5,3 +5,6 @@ description = "跨机搬运：服务器之间经本地中转、一份文件分�
 
 # 只做编排，分块与校验都在 base.upload/download 里。
 [capabilities]
+# 无状态：只做编排，分块与校验都在 host。
+stateless = true
+

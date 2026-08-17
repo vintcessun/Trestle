@@ -127,6 +127,68 @@ async fn every_tool_that_names_a_machine_requires_it() {
 }
 
 #[tokio::test]
+async fn a_stateless_plugin_gets_a_pool_and_a_stateful_one_does_not() {
+    let (h, _) = host().await;
+
+    // 一个 wasm 实例被调用期间是独占的，所以「几个实例」就等于「几个 agent
+    // 能同时用这个插件而不互相等」。声明了 stateless 的才给池。
+    let job = h.tools.instance_of("job").await.expect("job is loaded");
+    assert!(job.manifest.capabilities.stateless);
+    assert!(
+        job.pool.size() > 1,
+        "job declared itself stateless but only got {} instance",
+        job.pool.size()
+    );
+
+    // hello-py 没声明（18 MB 的组件，池化就是 ×N 内存），所以只有一个。
+    if let Some(py) = h.tools.instance_of("hello-py").await {
+        assert!(!py.manifest.capabilities.stateless);
+        assert_eq!(
+            py.pool.size(),
+            1,
+            "a plugin that did not declare stateless must not be pooled — \
+             it may keep state in wasm memory, and pooling would silently split it"
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs real servers"]
+async fn two_agents_calling_the_same_tool_do_not_block_each_other() {
+    let (h, _) = host().await;
+    let t = target();
+
+    // 先热身，把连接建起来——测的是插件实例的并发，不是建链。
+    h.op(&t, "shell", r#"{"command":"true","timeout_secs":20}"#)
+        .await
+        .expect("warm up");
+
+    // 两个 agent 同时调同一个工具。fs_list 里那条命令要跑一秒。
+    let args = serde_json::json!({"target": t, "path": "/tmp"}).to_string();
+    let slow =
+        serde_json::json!({"target": t, "command": "sleep 2", "timeout_secs": 30}).to_string();
+
+    let started = std::time::Instant::now();
+    let (a, b) = tokio::join!(h.call_tool("fs_list", &args), h.call_tool("fs_list", &args),);
+    a.expect("first call");
+    b.expect("second call");
+    let both = started.elapsed();
+
+    // 再用一个明确会慢的调用把差别放大：两次各 2 秒，池化的话接近 2 秒。
+    let started = std::time::Instant::now();
+    let (a, b) = tokio::join!(h.op(&t, "shell", &slow), h.op(&t, "shell", &slow));
+    a.expect("first shell");
+    b.expect("second shell");
+    let elapsed = started.elapsed();
+
+    println!("two fs_list in {both:?}, two 2s shells in {elapsed:?}");
+    assert!(
+        elapsed < std::time::Duration::from_millis(3500),
+        "two concurrent 2s calls took {elapsed:?} — they are serialising, not overlapping"
+    );
+}
+
+#[tokio::test]
 async fn calling_a_tool_that_does_not_exist_says_so() {
     let (h, _) = host().await;
     let err = h.call_tool("job_teleport", "{}").await.unwrap_err();

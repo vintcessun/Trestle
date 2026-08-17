@@ -219,6 +219,35 @@ impl Runtime {
         })
     }
 
+    /// 起一个技能插件的实例池。
+    ///
+    /// 声明了 `stateless` 的插件拿 `size` 个实例，两个 agent 同时调同一个工具因此
+    /// 互不阻塞；没声明的只拿一个——因为它可能把状态存在 wasm 内存里，
+    /// 而那种情况下池化会让实例各看各的，**静默**出错。
+    ///
+    /// `make_state` 每个实例调一次：`ToolState` 里有 `WasiCtx`，不能克隆。
+    pub async fn instantiate_tool_pool(
+        &self,
+        loaded: &LoadedToolPlugin,
+        mut make_state: impl FnMut() -> crate::tool_state::ToolState,
+        size: usize,
+    ) -> anyhow::Result<ToolPool> {
+        let size = if loaded.manifest.capabilities.stateless {
+            size.max(1)
+        } else {
+            1
+        };
+        let mut instances = Vec::with_capacity(size);
+        for _ in 0..size {
+            instances.push(self.instantiate_tool(loaded, make_state()).await?);
+        }
+        Ok(ToolPool {
+            name: loaded.manifest.name.clone(),
+            instances,
+            next: std::sync::atomic::AtomicUsize::new(0),
+        })
+    }
+
     /// 实例化一个技能插件。
     ///
     /// 它拿到的导入里**没有传输工具箱**——技能插件够不到 SSH、够不到本机进程、
@@ -409,6 +438,11 @@ impl ToolInstance {
             .map_err(|e| self.trap(e))
     }
 
+    /// 这个实例当前有没有被占用。实例池靠它挑空闲的那个。
+    pub fn is_free(&self) -> bool {
+        self.inner.try_lock().is_ok()
+    }
+
     /// 这个插件贡献的 Web UI 片段。空串表示它不要面板。
     pub async fn ui_panel(&self) -> TResult<String> {
         let mut g = self.inner.lock().await;
@@ -424,6 +458,39 @@ impl ToolInstance {
             target: String::new(),
             detail: format!("plugin '{}' trapped: {e}", self.name),
         }
+    }
+}
+
+/// 一个技能插件的实例池。
+///
+/// 和 [`ConnectorPool`] 是同一个东西，只是装的是技能插件。存在的理由也一样：
+/// 一个 wasm 实例被调用期间是独占的，所以「几个实例」就等于「几个 agent
+/// 能同时用这个插件而不互相等」。
+pub struct ToolPool {
+    pub name: String,
+    instances: Vec<ToolInstance>,
+    next: std::sync::atomic::AtomicUsize,
+}
+
+impl ToolPool {
+    /// 挑一个当前没被占用的实例；都忙就轮转到下一个等着。
+    pub fn pick(&self) -> &ToolInstance {
+        for inst in &self.instances {
+            if inst.is_free() {
+                return inst;
+            }
+        }
+        let i = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        &self.instances[i % self.instances.len()]
+    }
+
+    /// 池里任意一个都能回答的问题（list-tools / ui-panel / on-tick）用它。
+    pub fn any(&self) -> &ToolInstance {
+        &self.instances[0]
+    }
+
+    pub fn size(&self) -> usize {
+        self.instances.len()
     }
 }
 

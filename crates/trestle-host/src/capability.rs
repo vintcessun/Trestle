@@ -59,6 +59,18 @@ pub struct Capabilities {
     /// 允许贡献 Web UI 资源。
     #[serde(default)]
     pub ui: bool,
+
+    /// 我不在 wasm 内存里存跨调用的状态，可以起多个实例。
+    ///
+    /// 一个 wasm 实例在被调用期间是**独占**的，所以默认每个插件只有一个实例，
+    /// 两个 agent 同时调同一个工具就得排队。声明了这条之后 host 会起一个实例池，
+    /// 它们互不阻塞。
+    ///
+    /// **只有真的无状态才能声明。** 如果插件把东西存在 wasm 全局变量里
+    /// （`static mut`、`thread_local!`），池里的实例会各看各的，而且是**静默**出错——
+    /// host 没有办法替你验证这一点。要跨调用记东西，用 `host.state-*`（per-plugin KV）。
+    #[serde(default)]
+    pub stateless: bool,
 }
 
 impl Capabilities {
