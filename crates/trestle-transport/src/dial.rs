@@ -319,7 +319,7 @@ mod tests {
         full.extend_from_slice(trailing);
 
         let proxy = tokio::spawn(fake_proxy(server, full));
-        socks5_handshake(&mut client, "1.2.3.4", 22).await.unwrap();
+        socks5_handshake(&mut client, "203.0.113.1", 22).await.unwrap();
         proxy.await.unwrap();
 
         // 握手结束后流上剩下的第一批字节必须正好是 SSH 横幅。
@@ -336,7 +336,7 @@ mod tests {
             server.read_exact(&mut greeting).await.unwrap();
             server.write_all(b"HT").await.unwrap(); // 这是个 HTTP 代理
         });
-        let err = socks5_handshake(&mut client, "1.2.3.4", 22)
+        let err = socks5_handshake(&mut client, "203.0.113.1", 22)
             .await
             .unwrap_err();
         assert!(err.contains("not a SOCKS5 proxy"), "{err}");

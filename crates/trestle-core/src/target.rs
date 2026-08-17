@@ -215,14 +215,14 @@ mod tests {
 
     #[test]
     fn resolution_is_case_insensitive() {
-        assert_eq!(registry().resolve("X63").unwrap().name, "gpu-4");
+        assert_eq!(registry().resolve("GPU-4").unwrap().name, "gpu-4");
     }
 
     #[test]
     fn unknown_name_lists_the_alternatives() {
-        let err = registry().resolve("x36").unwrap_err();
+        let err = registry().resolve("gpu-9").unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("x36"), "{msg}");
+        assert!(msg.contains("gpu-9"), "{msg}");
         assert!(msg.contains("gpu-1") && msg.contains("gpu-4"), "{msg}");
     }
 

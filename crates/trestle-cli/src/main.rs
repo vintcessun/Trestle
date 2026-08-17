@@ -516,6 +516,14 @@ async fn run(cli: Cli) -> anyhow::Result<std::process::ExitCode> {
                     }
                 );
             }
+            // Web UI 的端口是随机分配的，而 daemon 是被懒启动的——它的 stderr
+            // 进了 null，所以启动日志里那行地址没人看得见。这里是唯一说得出它的地方。
+            if let Some(info) = trestle_daemon::ipc::DaemonInfo::read(&root)
+                && info.http_port != 0
+            {
+                println!("\nWeb UI    http://127.0.0.1:{}/", info.http_port);
+            }
+
             if failures > 0 {
                 std::process::ExitCode::FAILURE
             } else {

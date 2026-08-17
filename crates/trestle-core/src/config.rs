@@ -491,7 +491,7 @@ mod tests {
 
             [targets.gpu-4]
             connector = "typo-here"
-            host = "1.2.3.4"
+            host = "203.0.113.1"
             port = 22
             user = "alice"
             "#,

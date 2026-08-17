@@ -146,7 +146,7 @@ impl Fleet {
 
     /// 对多台机器并发执行同一个操作。
     ///
-    /// 顺序执行整支机队在冷启动时是六倍延迟，所以并发这件事必须由 host 做——
+    /// 顺序执行 N 台机器在冷启动时就是 N 倍延迟，所以并发这件事必须由 host 做——
     /// 插件那边一个 wasm 实例同时只能进一个调用。
     pub async fn op_many(
         &self,
@@ -201,7 +201,7 @@ mod tests {
     #[test]
     fn a_connector_can_always_grow_to_at_least_two_instances() {
         // 池的上限就是「同一组机器能几路并发」。上限为 1 的机器等于没有并发，
-        // fleet_status 会退化成整支机队排队——这条守着默认值不掉到那里去。
+        // fleet_status 会退化成一台一台排队——这条守着默认值不掉到那里去。
         assert!(
             PoolPolicy::default().max >= 2,
             "default pool ceiling is {}",

@@ -21,6 +21,13 @@ pub const DAEMON_FILE: &str = "daemon.json";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonInfo {
     pub port: u16,
+    /// Web UI 与 Monitor ws 的端口。
+    ///
+    /// 它必须写在这里：端口是随机分配的，而 daemon 是被**懒启动**的——
+    /// 它的 stderr 被丢进了 null，所以启动日志里那行地址没人看得见。
+    /// 不落在这个文件里，Web UI 就等于不存在。
+    #[serde(default)]
+    pub http_port: u16,
     pub token: String,
     pub pid: u32,
     pub version: String,
@@ -398,6 +405,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let info = DaemonInfo {
             port: 41234,
+            http_port: 41235,
             token: new_token(),
             pid: 42,
             version: "0.1.0".into(),

@@ -205,7 +205,7 @@ async fn notes_need_an_expiry_and_are_visible_to_everyone() {
     let err = a
         .call(RequestBody::PutNote {
             agent: agent_a.clone(),
-            scope: "gpu-4".into(),
+            scope: "demo-host".into(),
             text: "forever".into(),
             ttl_secs: 0,
         })
@@ -215,7 +215,7 @@ async fn notes_need_an_expiry_and_are_visible_to_everyone() {
 
     a.call(RequestBody::PutNote {
         agent: agent_a.clone(),
-        scope: "gpu-4:/data/exp1".into(),
+        scope: "demo-host:/data/exp1".into(),
         text: "running latent-v3, please leave this alone".into(),
         ttl_secs: 600,
     })
@@ -225,7 +225,7 @@ async fn notes_need_an_expiry_and_are_visible_to_everyone() {
     // 另一个 agent 必须看得到 —— 这就是留言板存在的全部意义。
     let notes = b
         .call(RequestBody::Notes {
-            scope: Some("gpu-4".into()),
+            scope: Some("demo-host".into()),
         })
         .await
         .expect("notes");
@@ -244,7 +244,7 @@ async fn agents_can_see_what_the_others_are_doing() {
     // a 做点事。
     a.call(RequestBody::Op {
         agent: agent_a.clone(),
-        target: "gpu-4".into(),
+        target: "demo-host".into(),
         op: "shell".into(),
         payload: r#"{"command":"true","timeout_secs":20}"#.into(),
     })
@@ -261,7 +261,7 @@ async fn agents_can_see_what_the_others_are_doing() {
         .expect("agent a is listed");
     assert_eq!(a_row["label"], "claude-code:paper");
     assert_eq!(a_row["last_action"], "shell");
-    assert_eq!(a_row["last_target"], "gpu-4");
+    assert_eq!(a_row["last_target"], "demo-host");
 }
 
 #[tokio::test]
@@ -346,8 +346,19 @@ async fn the_web_ui_and_its_api_answer() {
         "the UI shell did not render"
     );
 
+    // 断言的是**形状**不是名字：connector 叫什么由用户的配置决定，写死在这里
+    // 等于把某个人的机队名字印进一个公开仓库。
     let targets = http_get(port, "/api/targets").await;
-    assert!(targets.contains("gpu-cluster"), "{targets}");
+    let grouped = json_body(&targets);
+    let groups = grouped.as_object().expect("grouped by connector");
+    assert!(!groups.is_empty(), "{targets}");
+    for (connector, machines) in groups {
+        assert!(!connector.is_empty());
+        assert!(
+            machines.as_array().is_some_and(|m| !m.is_empty()),
+            "{connector} has no machines: {targets}"
+        );
+    }
 
     let tools = http_get(port, "/api/tools").await;
     assert!(
@@ -357,6 +368,17 @@ async fn the_web_ui_and_its_api_answer() {
 }
 
 /// 极简 HTTP GET，避免为两个断言拖进一个 HTTP 客户端。
+/// 从一个带 HTTP 头的响应里取出 JSON。
+///
+/// 头和 body 之间隔一个空行，但用它切会踩到 body 自己的空行；这里直接从
+/// 第一个 `{` 起，对我们这几个只返回对象的端点足够，也不需要处理换行风格。
+fn json_body(response: &str) -> serde_json::Value {
+    let start = response
+        .find('{')
+        .unwrap_or_else(|| panic!("no JSON in the response: {response}"));
+    serde_json::from_str(&response[start..]).expect("json")
+}
+
 async fn http_get(port: u16, path: &str) -> String {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut s = tokio::net::TcpStream::connect(("127.0.0.1", port))
@@ -365,9 +387,10 @@ async fn http_get(port: u16, path: &str) -> String {
     s.write_all(format!("GET {path} HTTP/1.0\r\nHost: localhost\r\n\r\n").as_bytes())
         .await
         .unwrap();
-    let mut body = String::new();
-    s.read_to_string(&mut body).await.ok();
-    body
+    let mut raw = String::new();
+    s.read_to_string(&mut raw).await.ok();
+    // 整个响应原样返回，包括 HTTP 头。要当 JSON 解析的调用方用 [`json_body`]。
+    raw
 }
 
 #[tokio::test]
@@ -381,7 +404,7 @@ async fn a_forward_is_reclaimed_when_its_session_ends() {
     owner
         .call(RequestBody::Op {
             agent: owner_id.clone(),
-            target: "gpu-4".into(),
+            target: "demo-host".into(),
             op: "shell".into(),
             payload: serde_json::json!({
                 "command": "mkdir -p /tmp/trestle-fwd && cd /tmp/trestle-fwd && \
@@ -397,7 +420,7 @@ async fn a_forward_is_reclaimed_when_its_session_ends() {
     let fwd = owner
         .call(RequestBody::Op {
             agent: owner_id.clone(),
-            target: "gpu-4".into(),
+            target: "demo-host".into(),
             op: "forward".into(),
             payload: r#"{"remote_port":18777}"#.into(),
         })
@@ -438,7 +461,7 @@ async fn a_forward_is_reclaimed_when_its_session_ends() {
     observer
         .call(RequestBody::Op {
             agent: "cleanup".into(),
-            target: "gpu-4".into(),
+            target: "demo-host".into(),
             op: "shell".into(),
             payload: serde_json::json!({
                 "command": "pkill -f 'http.server 18777'; rm -rf /tmp/trestle-fwd",
@@ -457,7 +480,7 @@ async fn the_daemon_routes_operations_to_the_right_connector() {
     let (client, agent) = d.client("test").await;
 
     // 两台归属完全不同 connector 的机器，调用方式一模一样。
-    for target in ["gpu-4", "web-1"] {
+    for target in ["demo-host", "web-1"] {
         let out = client
             .call(RequestBody::Op {
                 agent: agent.clone(),

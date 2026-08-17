@@ -170,7 +170,7 @@ interface base {
 
     /// 对多台机器并发执行同一个操作。
     ///
-    /// 这不是「为了少写一个循环」——插件顺序调整支机队，冷启动时是六倍延迟。
+    /// 这不是「为了少写一个循环」——插件顺序调 N 台机器，冷启动时就是 N 倍延迟。
     /// 并发编排交给 host，插件只说要打哪几台。
     call-many: func(targets: list<string>, op: string, payload: string) -> list<result<string, error>>;
 }
@@ -189,10 +189,6 @@ interface tasks {
     cancel: func(name: string);
 }
 
-/// GPU 由 daemon 单点分配，插件不自己抢锁。
-///
-/// 分配器看到的是 `nvidia-smi` 的**真实占用**加上自己刚分配还没起来的预留，
-/// 所以别人绕过 Trestle 直接 ssh 上去占的卡也照样可见。
 /// 通用的资源仲裁：**同一份资源谁在用，由同一个点说了算**。
 ///
 /// 这里没有一个字是关于 GPU 的。GPU 只是第一个用它的资源，由 `gpu` 插件实现；
@@ -212,7 +208,7 @@ interface arbiter {
     ///
     /// `pool` 形如 `gpu-4/gpu`：`<在哪>/<什么资源>`。
     /// `units` 是调用方**刚刚查到的真实世界**，JSON 数组：
-    /// `[{"id":"0","busy":false,"label":"GPU, 512 MiB used"}, ...]`
+    /// `[{"id":"0","busy":false,"label":"512 MiB used"}, ...]`
     /// `busy` 是「外面有人在用」，`label` 会原样出现在拿不到时的错误里。
     ///
     /// 返回 JSON：`{"claim":"c7","units":["0","1"]}`

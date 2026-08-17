@@ -62,16 +62,45 @@ fn config_store() -> Arc<ConfigStore> {
     Arc::new(ConfigStore::load(root).expect("config"))
 }
 
+/// 按**驱动**找 connector，而不是按名字。
+///
+/// 名字是用户给自己那组机器起的——写死在这里等于把某个人的机队名字印进一个
+/// 公开仓库。驱动名（`ssh-socks5` / `ssh-direct`）是这个项目自己的东西，
+/// 而且它才是测试真正关心的：一个走代理，一个直连。
+fn connector_using(driver: &str) -> String {
+    let store = config_store();
+    store
+        .config()
+        .connectors
+        .iter()
+        .find(|(_, c)| c.plugin == driver && c.enabled)
+        .map(|(name, _)| name.clone())
+        .unwrap_or_else(|| panic!("no enabled connector uses the {driver} driver"))
+}
+
+/// 这个 connector 管的第一台机器。真调测试拿它当靶子。
+fn first_target_of(connector: &str) -> String {
+    let store = config_store();
+    let registry = store.targets().expect("targets");
+    registry
+        .iter()
+        .find(|t| t.connector == connector)
+        .map(|t| t.name.clone())
+        .unwrap_or_else(|| panic!("{connector} manages no machines"))
+}
+
 /// 一个 connector 只实例化一次，整个测试二进制共用。
 /// 每个测试各建一个的话 wasmtime 要把同一个组件反复编译。
-async fn shared(name: &'static str) -> &'static trestle_host::runtime::ConnectorInstance {
-    static LAB: tokio::sync::OnceCell<trestle_host::runtime::ConnectorInstance> =
+async fn shared(driver: &'static str) -> &'static trestle_host::runtime::ConnectorInstance {
+    static PROXY: tokio::sync::OnceCell<trestle_host::runtime::ConnectorInstance> =
         tokio::sync::OnceCell::const_new();
-    static MINE: tokio::sync::OnceCell<trestle_host::runtime::ConnectorInstance> =
+    static DIRECT: tokio::sync::OnceCell<trestle_host::runtime::ConnectorInstance> =
         tokio::sync::OnceCell::const_new();
-    let cell = if name == "cloud" { &MINE } else { &LAB };
-    cell.get_or_init(|| instantiate(name, Arc::new(Collector::default())))
-        .await
+    let cell = if driver == "ssh-direct" { &DIRECT } else { &PROXY };
+    cell.get_or_init(|| async {
+        instantiate(&connector_using(driver), Arc::new(Collector::default())).await
+    })
+    .await
 }
 
 /// 按**配置里的 connector 名**实例化——驱动是哪个由配置说了算。
@@ -132,15 +161,29 @@ fn config_that_forces_a_start() -> String {
 #[tokio::test]
 async fn a_connector_component_loads_and_reports_its_machines() {
     let events = Arc::new(Collector::default());
-    let c = instantiate("gpu-cluster", Arc::clone(&events)).await;
+    let c = instantiate(&connector_using("ssh-socks5"), Arc::clone(&events)).await;
 
     let targets = c.targets().await.expect("targets");
     let names: Vec<_> = targets.iter().map(|t| t.name.as_str()).collect();
-    assert!(names.contains(&"gpu-4"), "got {names:?}");
-    assert!(names.contains(&"gpu-1"), "got {names:?}");
+    // 报的机器必须正好是配置里归它管的那些——名字是什么无所谓，
+    // 「不多不少」才是这条要守的东西。
+    let store = config_store();
+    let mine = connector_using("ssh-socks5");
+    let expected: Vec<String> = store
+        .targets()
+        .expect("targets")
+        .iter()
+        .filter(|t| t.connector == mine)
+        .map(|t| t.name.clone())
+        .collect();
+    assert!(!expected.is_empty());
+    for want in &expected {
+        assert!(names.contains(&want.as_str()), "missing {want}: {names:?}");
+    }
     // 这个 connector 不该看到别的 connector 的机器。
+    let other = first_target_of(&connector_using("ssh-direct"));
     assert!(
-        !names.contains(&"web-1"),
+        !names.contains(&other.as_str()),
         "leaked another connector's machines: {names:?}"
     );
 
@@ -149,7 +192,7 @@ async fn a_connector_component_loads_and_reports_its_machines() {
 
 #[tokio::test]
 async fn a_connector_publishes_a_config_schema_for_the_web_ui() {
-    let c = shared("gpu-cluster").await;
+    let c = shared("ssh-socks5").await;
     let schema: serde_json::Value =
         serde_json::from_str(&c.config_schema().await.expect("schema")).expect("valid json");
     assert_eq!(schema["type"], "object");
@@ -162,8 +205,8 @@ async fn a_connector_publishes_a_config_schema_for_the_web_ui() {
 
 #[tokio::test]
 async fn the_two_connectors_manage_disjoint_machines() {
-    let lab = shared("gpu-cluster").await;
-    let mine = shared("cloud").await;
+    let lab = shared("ssh-socks5").await;
+    let mine = shared("ssh-direct").await;
 
     let lab_names: Vec<_> = lab
         .targets()
@@ -195,7 +238,7 @@ async fn the_config_is_what_carries_the_start_command() {
     // trestle.toml，也可能是 clone 下来只有样例。名字对不对由下面那条
     // 「check 和 start 说的是同一个东西」来管。
     let store = config_store();
-    let lab = store.connector_section("gpu-cluster").expect("section");
+    let lab = store.connector_section(&connector_using("ssh-socks5")).expect("section");
     assert_eq!(lab.plugin, "ssh-socks5");
     assert!(
         lab.allow_exec.iter().any(|p| p == "docker"),
@@ -225,7 +268,7 @@ async fn the_config_is_what_carries_the_start_command() {
     assert!(remedy.contains("docker run"), "{remedy}");
 
     // 直连那一组没有前置条件，所以也不该有任何本机命令的授权。
-    let mine = store.connector_section("cloud").expect("section");
+    let mine = store.connector_section(&connector_using("ssh-direct")).expect("section");
     assert_eq!(mine.plugin, "ssh-direct");
     assert!(mine.allow_exec.is_empty(), "{:?}", mine.allow_exec);
     assert!(mine.settings.get("ready").is_none());
@@ -311,8 +354,9 @@ async fn allow_exec_in_the_config_is_what_grants_it() {
 #[ignore = "needs real servers"]
 async fn a_wasm_connector_drives_the_seven_operations_end_to_end() {
     let events = Arc::new(Collector::default());
-    let c = instantiate("gpu-cluster", Arc::clone(&events)).await;
-    let target = std::env::var("TRESTLE_TEST_TARGET").unwrap_or_else(|_| "gpu-4".into());
+    let c = instantiate(&connector_using("ssh-socks5"), Arc::clone(&events)).await;
+    let target = std::env::var("TRESTLE_TEST_TARGET")
+        .unwrap_or_else(|_| first_target_of(&connector_using("ssh-socks5")));
 
     c.ensure_ready().await.expect("ensure_ready");
 
@@ -440,8 +484,9 @@ async fn fetch(port: u64, path: &str) -> String {
 #[tokio::test]
 #[ignore = "needs real servers"]
 async fn upload_and_download_work_through_the_plugin() {
-    let c = shared("gpu-cluster").await;
-    let target = std::env::var("TRESTLE_TEST_TARGET").unwrap_or_else(|_| "gpu-4".into());
+    let c = shared("ssh-socks5").await;
+    let target = std::env::var("TRESTLE_TEST_TARGET")
+        .unwrap_or_else(|_| first_target_of(&connector_using("ssh-socks5")));
 
     let tmp = std::env::temp_dir().join("trestle-m2");
     std::fs::create_dir_all(&tmp).unwrap();
@@ -491,8 +536,9 @@ async fn upload_and_download_work_through_the_plugin() {
 #[tokio::test]
 #[ignore = "needs real servers"]
 async fn my_servers_reaches_its_machines_with_a_key_not_a_password() {
-    let c = shared("cloud").await;
-    let target = std::env::var("TRESTLE_MY_TARGET").unwrap_or_else(|_| "web-1".into());
+    let c = shared("ssh-direct").await;
+    let target = std::env::var("TRESTLE_MY_TARGET")
+        .unwrap_or_else(|_| first_target_of(&connector_using("ssh-direct")));
 
     c.ensure_ready().await.expect("ensure_ready");
     let out = c

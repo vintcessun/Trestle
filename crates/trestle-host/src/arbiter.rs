@@ -48,7 +48,7 @@ pub struct Unit {
     /// 外面有人在用（不是我们分出去的）。
     #[serde(default)]
     pub busy: bool,
-    /// 拿不到时错误里会原样带上它。「gpu0 (GPU, 40000 MiB used)」比「失败」有用得多。
+    /// 拿不到时错误里会原样带上它。「gpu0 (40000 MiB used)」比「失败」有用得多。
     #[serde(default)]
     pub label: String,
 }
@@ -221,7 +221,7 @@ mod tests {
             .map(|(id, busy)| Unit {
                 id: (*id).into(),
                 busy: *busy,
-                label: format!("GPU, {} MiB used", if *busy { 40000 } else { 12 }),
+                label: format!("{} MiB used", if *busy { 40000 } else { 12 }),
             })
             .collect()
     }

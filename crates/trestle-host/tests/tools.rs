@@ -67,8 +67,59 @@ async fn build_host() -> (TrestleHost, Arc<Collector>) {
     (h, events)
 }
 
+/// 按**驱动**找 connector，而不是按名字。
+///
+/// 名字是用户给自己那组机器起的——写死在这里等于把某个人的机队名字印进一个
+/// 公开仓库。驱动名是这个项目自己的东西，而且它才是测试真正关心的。
+fn connector_using(driver: &str) -> String {
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let root = std::env::var("TRESTLE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| repo.join("config"));
+    let store = ConfigStore::load(root).expect("config");
+    store
+        .config()
+        .connectors
+        .iter()
+        .find(|(_, c)| c.plugin == driver && c.enabled)
+        .map(|(name, _)| name.clone())
+        .unwrap_or_else(|| panic!("no enabled connector uses the {driver} driver"))
+}
+
+fn proxy_connector() -> String {
+    connector_using("ssh-socks5")
+}
+
 fn target() -> String {
-    std::env::var("TRESTLE_TEST_TARGET").unwrap_or_else(|_| "gpu-4".into())
+    std::env::var("TRESTLE_TEST_TARGET").unwrap_or_else(|_| {
+        let c = proxy_connector();
+        // 真调测试的靶子取配置里的第一台，不写死名字。
+        futures_first_target(&c)
+    })
+}
+
+fn futures_first_target(connector: &str) -> String {
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let root = std::env::var("TRESTLE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| repo.join("config"));
+    let store = ConfigStore::load(root).expect("config");
+    let registry = store.targets().expect("targets");
+    registry
+        .iter()
+        .find(|t| t.connector == connector)
+        .map(|t| t.name.clone())
+        .unwrap_or_else(|| panic!("{connector} manages no machines"))
 }
 
 #[tokio::test]
@@ -192,7 +243,7 @@ async fn two_agents_calling_the_same_tool_do_not_block_each_other() {
     let elapsed = started.elapsed();
 
     let fs = h.tools.instance_of("fs").await.expect("fs is loaded");
-    let connector = h.fleet.pool("gpu-cluster").expect("connector pool");
+    let connector = h.fleet.pool(&proxy_connector()).expect("connector pool");
     println!(
         "two fs_list in {both:?}, two 2s shells in {elapsed:?}; \
          fs pool {} → {}, connector pool {} → {}",
@@ -552,14 +603,17 @@ async fn fleet_status_reports_every_machine_and_groups_by_connector() {
         "targets_list took {elapsed:?} — it must not connect to anything"
     );
     let grouped: serde_json::Value = serde_json::from_str(&listed).unwrap();
-    assert!(grouped.get("gpu-cluster").is_some(), "{grouped}");
-    assert!(grouped.get("cloud").is_some(), "{grouped}");
+    assert!(grouped.get(proxy_connector().as_str()).is_some(), "{grouped}");
+    assert!(
+        grouped.get(connector_using("ssh-direct").as_str()).is_some(),
+        "{grouped}"
+    );
 
     let lab: Vec<String> = h
         .fleet
         .targets()
         .iter()
-        .filter(|t| t.connector == "gpu-cluster")
+        .filter(|t| t.connector == proxy_connector())
         .map(|t| t.name.clone())
         .collect();
 
@@ -612,7 +666,7 @@ async fn gpu_find_ranks_machines_by_free_cards() {
         .fleet
         .targets()
         .iter()
-        .filter(|t| t.connector == "gpu-cluster")
+        .filter(|t| t.connector == proxy_connector())
         .map(|t| t.name.clone())
         .collect();
 
@@ -645,12 +699,12 @@ async fn xfer_moves_a_file_between_two_machines_that_cannot_see_each_other() {
     let registry = h.fleet.targets().clone();
     let from = registry
         .iter()
-        .find(|t| t.connector == "gpu-cluster")
+        .find(|t| t.connector == proxy_connector())
         .map(|t| t.name.clone())
         .expect("a lab machine");
     let to = registry
         .iter()
-        .find(|t| t.connector == "cloud")
+        .find(|t| t.connector == connector_using("ssh-direct"))
         .map(|t| t.name.clone())
         .expect("one of my machines");
 
@@ -710,7 +764,7 @@ async fn hitting_several_machines_happens_concurrently() {
     let registry = h.fleet.targets().clone();
     let lab: Vec<String> = registry
         .iter()
-        .filter(|t| t.connector == "gpu-cluster")
+        .filter(|t| t.connector == proxy_connector())
         .map(|t| t.name.clone())
         .collect();
     assert!(

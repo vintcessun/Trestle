@@ -153,6 +153,7 @@ async fn run(cli: Cli) -> trestle_core::Result<()> {
     let token = ipc::new_token();
     DaemonInfo {
         port,
+        http_port,
         token: token.clone(),
         pid: std::process::id(),
         version: env!("CARGO_PKG_VERSION").into(),
