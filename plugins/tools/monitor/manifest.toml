@@ -1,0 +1,8 @@
+name = "monitor"
+version = "0.1.0"
+kind = "tool"
+description = "把一个 WebSocket URL 交给 Claude Code 的 Monitor"
+
+[capabilities]
+# 唯一需要的权限：开 ws 端点。
+ws = true

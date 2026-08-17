@@ -1,0 +1,14 @@
+name = "gpu-cluster"
+version = "0.1.0"
+kind = "connector"
+description = "组里那几台 GPU 服务器，统一经 VPN 容器的 SOCKS5 出去"
+
+# 这个插件能做什么，就这些。host 在每个导入的入口处强制，插件绕不过去——
+# wasm 组件没有 syscall，这些导入是它唯一能碰到外界的地方。
+[capabilities]
+# 只允许叫醒 VPN 容器。写成 ["docker"] 而不是 ["docker","bash"]：
+# 一旦能跑任意本机命令，capability 模型就没有意义了。
+local_exec = ["docker"]
+# connector 天生要连任意目标机器，所以不限制拨号。
+dial = []
+forward = true

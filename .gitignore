@@ -6,12 +6,21 @@ config/secrets.toml
 
 # Rust
 /target/
+plugins/**/target/
 **/*.rs.bk
 Cargo.lock.orig
 
-# 运行时状态
-/.trestle/
+# 插件产物：由 scripts/build-plugins.ps1 生成，不入库
+plugins/**/*.wasm
+# componentize-py 生成的绑定
+plugins/**/wit_world/
+plugins/**/componentize_py_async_support/
+
+# 运行期状态：所有运行期文件都在程序目录下（见 docs/08）
 daemon.json
+state/
+config/state/
+logs/
 *.log
 
 # 编辑器

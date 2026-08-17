@@ -1,4 +1,9 @@
-# 07 · 来自 Python 原型的实测数据与教训
+# 07 · 实测数据与教训
+
+> 这份文档是唯一从上一代原封不动继承下来的——它记的是**实测事实**，不是设计。
+> 底部补了 Rust 版自己的测量。
+
+# 来自 Python 原型的实测数据与教训
 
 上一代 `D:\Scripts\fleet`（Python）在一组真机上跑通并做过三套测试（17 项 + 19 项 + 53 个 MCP 工具
 逐个真调）。这份文档记录**实测事实**，不是推测——Rust 版可以直接拿来当基线和回归目标。
@@ -123,14 +128,67 @@ ps -eo cmd | grep -c '[s]eq 1 20'
 
 ## 可复用资产映射
 
-| Python 文件 | Trestle 对应 | 直接可搬的东西 |
-|---|---|---|
-| `fleetlib/proxy.py` | `trestle-connectors::socks5` | SOCKS5 CONNECT 握手字节序列（no-auth）、容器拉起状态机、11080 的由来 |
-| `fleetlib/pool.py` | `trestle-daemon::SessionPool` | 连接复用/lazy/自愈语义、**UnknownState 的判定边界**、幂等 op 白名单 |
-| `remote/fleet_agent.py` | `trestle-agent` | JSON-Lines 协议帧、op 清单、job 的 `{meta.json,pid,rc,out.log}` 落盘布局、log_probe 增量协议 |
-| `fleetlib/ops.py` | `trestle-base` + `xfer_*` | 分块传输(512KB)+sha256 校验、目录同步的差异算法（size+mtime 比对）、跨机中转 |
-| `servers.json` | `config/trestle.toml` | 一组拓扑（已迁移） |
-| `mcp_smoke.py` | `tests/` | **逐个工具真调 + 校验 schema required** 的测试形态，值得照搬 |
+| Python 文件 | Rust/wasm 落点 |
+|---|---|
+| `fleetlib/proxy.py` | `plugins/connectors/gpu-cluster`（SOCKS5 握手在 `trestle-transport::dial`） |
+| `fleetlib/pool.py` | connector 插件的长连接逻辑 + `trestle-transport::deploy` |
+| `remote/fleet_agent.py` | `agent-py/trestle_agent.py` |
+| `fleetlib/ops.py` | `agent-py` 的 put_chunk/get_chunk + `trestle-transport::transfer` |
+| `servers.json` | `config/trestle.toml`（已迁移） |
+| `mcp_smoke.py` | `crates/trestle-daemon/tests/smoke.rs` |
 
 最后一条特别提一句：`mcp_smoke.py` 那种"对每个工具用安全参数真调一次"的测试，在 53 个工具里
-抓到了 1 个真 bug（就是上面第 4 条）。Rust 版应该在 `tests/` 里保留等价物。
+抓到了 1 个真 bug（就是上面第 4 条）。Rust 版的等价物已经在
+`crates/trestle-daemon/tests/smoke.rs`，第 4 条那个形状还专门有一个测试守着
+（`an_output_path_is_always_the_path_that_was_asked_for`）。
+
+---
+
+# Rust 版自己的实测（2026-08-17）
+
+## 连接
+
+| | 稳态冷启动（接管） | 热调用 | 自愈 | 全量重装 |
+|---|---|---|---|---|
+| gpu-4 | 566ms | 36–44ms | 508ms | 785ms |
+| gpu-3 | ~800ms | 41ms | 569ms | — |
+| gpu-2 | ~900ms | 52ms | 731ms | — |
+| gpu-1（经 VPN） | 2.4s | 52–57ms | 2.5s | 7.2s |
+| web-1 | 1.0s | 26ms | 986ms | — |
+| web-2 | 1.2s | 116ms | 1.2s | — |
+
+冷热差在 gpu-4 上是 **36 倍**。这个比值掉下去就说明连接没被复用——那正是 daemon 模式
+要解决的问题，所以验收测试断言的是**比值**而不是绝对毫秒数（一组共用一个 VPN 容器，
+绝对延迟随网络窗口起伏，同一台机器见过 36ms 也见过 148ms）。
+
+并发：4 台机器各 `sleep 2`，实例池大小 2 时耗时 4.1s（串行会是 8s）。
+
+## 两个新踩的坑
+
+### 5. `stat -c` 不处理转义，`stat --printf` 才处理
+
+```bash
+stat -c '%s\t%Y' f        # 输出字面量 \t，split 什么都分不出来
+stat --printf='%s\t%Y' f  # 输出真的制表符
+```
+
+`find -printf` 与 `du` 都是正常的，只有 `stat -c` 这样。查这个花了一轮真调。
+
+### 6. gpu-1 上新建一个 SSH channel 要 ~1.7 秒
+
+gpu-4 上同一段代码是 125ms。不是 shell profile（干净环境下 `bash -c true` 是 0.00s），
+是那条链路的性质。
+
+结论不是「优化它」而是「少开几个」：部署被压到三个 channel——探测与启动合并成一条
+命令，哈希对得上时远端自己就把 agent 起了。全量重装 13.5s → 7.2s。
+
+> **通用教训：在慢链路上，往返次数比每次往返干多少活重要得多。**
+> 把四个探测合并成一条命令的收益，远大于把每条命令写得更精巧。
+
+### 一个测量陷阱
+
+一开始量出「`bash -lc true` 是 0.00s 而 `bash -c true` 是 1.51s」，差点据此改掉整个
+exec 路径。那个测量是**被污染的**：它是在 agent 已有的登录 shell 里嵌套跑的，
+外层早就把 profile 的钱付过了。用 `env -i` 重测就都是 0.00s。
+
+在一个已经初始化好的环境里测「初始化开销」，测到的永远是 0。

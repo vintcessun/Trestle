@@ -1,0 +1,210 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Trestle</title>
+<style>
+  :root {
+    --bg: #fbfbfa; --fg: #1a1a19; --muted: #6b6b68; --line: #e4e4e1;
+    --card: #ffffff; --accent: #2f6f5e; --warn: #9a5b1f; --bad: #a33a2c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16171a; --fg: #e8e8e6; --muted: #9a9a96; --line: #2a2c30;
+      --card: #1d1f23; --accent: #6fbfa5; --warn: #d99b55; --bad: #e0705f;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 14px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  header {
+    padding: 18px 24px; border-bottom: 1px solid var(--line);
+    display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap;
+  }
+  h1 { font-size: 17px; margin: 0; font-weight: 650; letter-spacing: -0.01em; }
+  header .sub { color: var(--muted); font-size: 13px; }
+  nav { margin-left: auto; display: flex; gap: 4px; }
+  nav button {
+    font: inherit; padding: 5px 12px; border-radius: 7px; cursor: pointer;
+    border: 1px solid transparent; background: transparent; color: var(--muted);
+  }
+  nav button[aria-current="true"] { background: var(--card); border-color: var(--line); color: var(--fg); }
+  main { padding: 22px 24px; max-width: 1100px; }
+  section[hidden] { display: none; }
+  .group { margin-bottom: 26px; }
+  .group > h2 {
+    font-size: 12px; text-transform: uppercase; letter-spacing: 0.07em;
+    color: var(--muted); margin: 0 0 10px; font-weight: 600;
+  }
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+    padding: 13px 15px; margin-bottom: 8px;
+  }
+  .card .name { font-weight: 600; }
+  .card .addr { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
+  .card .note { color: var(--muted); margin-top: 6px; white-space: pre-wrap; font-size: 13px; }
+  .row { display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; }
+  #stream {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px;
+    background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+    padding: 12px; height: 62vh; overflow: auto; white-space: pre-wrap;
+  }
+  #stream div { padding: 1px 0; border-bottom: 1px solid transparent; }
+  #stream .warn { color: var(--warn); }
+  #stream .error { color: var(--bad); }
+  #stream .t { color: var(--muted); }
+  .empty { color: var(--muted); font-style: italic; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
+  .pill {
+    display: inline-block; padding: 1px 8px; border-radius: 999px;
+    border: 1px solid var(--line); color: var(--muted); font-size: 12px;
+  }
+</style>
+
+<header>
+  <h1>Trestle</h1>
+  <span class="sub" id="summary">connecting…</span>
+  <nav>
+    <button data-tab="machines" aria-current="true">机器</button>
+    <button data-tab="panels">插件</button>
+    <button data-tab="agents">在场</button>
+    <button data-tab="tools">工具</button>
+    <button data-tab="events">事件流</button>
+  </nav>
+</header>
+
+<main>
+  <section id="machines"></section>
+  <section id="panels" hidden></section>
+  <section id="agents" hidden></section>
+  <section id="tools" hidden></section>
+  <section id="events" hidden>
+    <div id="stream"><div class="empty">等待事件…</div></div>
+  </section>
+</main>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s ?? "").replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+
+for (const b of document.querySelectorAll("nav button")) {
+  b.onclick = () => {
+    for (const other of document.querySelectorAll("nav button")) other.setAttribute("aria-current", other === b);
+    for (const s of document.querySelectorAll("main section")) s.hidden = s.id !== b.dataset.tab;
+  };
+}
+
+async function load(path) {
+  try { return await (await fetch(path)).json(); } catch { return null; }
+}
+
+async function renderMachines() {
+  const grouped = await load("/api/targets");
+  const el = $("#machines");
+  if (!grouped) { el.innerHTML = '<p class="empty">拿不到机器列表</p>'; return; }
+  let count = 0;
+  el.innerHTML = Object.entries(grouped).map(([connector, machines]) => {
+    count += machines.length;
+    return `<div class="group"><h2>${esc(connector)}</h2>` + machines.map(m => `
+      <div class="card">
+        <div class="row">
+          <span class="name">${esc(m.name)}</span>
+          <span class="addr">${esc(m.user)}@${esc(m.host)}:${m.port}</span>
+          <span class="addr">${esc(m.workdir)}</span>
+        </div>
+        ${m.note ? `<div class="note">${esc(m.note)}</div>` : ""}
+      </div>`).join("") + "</div>";
+  }).join("");
+  $("#summary").textContent = `${count} 台机器 · ${Object.keys(grouped).length} 个 connector`;
+}
+
+async function renderAgents() {
+  const data = await load("/api/agents");
+  const el = $("#agents");
+  if (!data) return;
+  const sessions = data.sessions.length ? data.sessions.map(s => `
+    <div class="card"><div class="row">
+      <span class="name">${esc(s.label)}</span>
+      <span class="pill">${esc(s.id)}</span>
+      <span class="addr">${s.last_action ? esc(s.last_action) + " → " + esc(s.last_target) : "还没做什么"}</span>
+    </div></div>`).join("") : '<p class="empty">当前没有 agent 连着</p>';
+
+  const forwards = data.forwards.length ? data.forwards.map(f => `
+    <div class="card"><div class="row">
+      <span class="addr">127.0.0.1:${f.local_port}</span>
+      <span>→</span>
+      <span class="addr">${esc(f.target)}:${f.remote_port}</span>
+      <span class="pill">属于 ${esc(f.owner)}</span>
+    </div></div>`).join("") : '<p class="empty">没有开着的端口转发</p>';
+
+  const notes = data.notes.length ? data.notes.map(n => `
+    <div class="card">
+      <div class="row"><span class="name">${esc(n.scope)}</span><span class="pill">${esc(n.author)}</span></div>
+      <div class="note">${esc(n.text)}</div>
+    </div>`).join("") : '<p class="empty">留言板是空的</p>';
+
+  el.innerHTML = `
+    <div class="group"><h2>在线的 agent</h2>${sessions}</div>
+    <div class="group"><h2>端口转发（会话级资源）</h2>${forwards}</div>
+    <div class="group"><h2>留言板</h2>${notes}</div>`;
+}
+
+async function renderTools() {
+  const tools = await load("/api/tools");
+  const el = $("#tools");
+  if (!tools) return;
+  el.innerHTML = `<div class="group"><h2>${tools.length} 个工具</h2>` + tools.map(t => `
+    <div class="card">
+      <div class="row"><span class="name"><code>${esc(t.name)}</code></span></div>
+      <div class="note">${esc(t.description)}</div>
+    </div>`).join("") + "</div>";
+}
+
+function startStream() {
+  const box = $("#stream");
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  const ws = new WebSocket(`${proto}://${location.host}/events`);
+  ws.onmessage = (ev) => {
+    if (box.querySelector(".empty")) box.innerHTML = "";
+    let e; try { e = JSON.parse(ev.data); } catch { return; }
+    const div = document.createElement("div");
+    if (e.level === "warn") div.className = "warn";
+    if (e.level === "error") div.className = "error";
+    const when = new Date(e.at_ms || Date.now()).toLocaleTimeString();
+    div.innerHTML = `<span class="t">${when}</span> ${esc(e.agent ?? "")} ${esc(e.type ?? "")} ` +
+      esc(JSON.stringify(Object.fromEntries(Object.entries(e).filter(([k]) =>
+        !["at_ms", "level", "agent", "type"].includes(k)))));
+    box.appendChild(div);
+    while (box.childElementCount > 500) box.removeChild(box.firstChild);
+    box.scrollTop = box.scrollHeight;
+  };
+  ws.onclose = () => setTimeout(startStream, 2000);
+}
+
+/// 插件贡献的面板。
+///
+/// Web UI 是插件的一部分：加一个插件，它自己带着自己的那块界面进来。
+/// 片段里的 <script> 要手动重新执行——innerHTML 插进来的脚本浏览器不会跑。
+async function renderPanels() {
+  const el = $("#panels");
+  let html = "";
+  try { html = await (await fetch("/ui/panels")).text(); } catch {}
+  if (!html.trim()) {
+    el.innerHTML = '<p class="empty">还没有插件贡献面板</p>';
+    return;
+  }
+  el.innerHTML = html;
+  for (const old of el.querySelectorAll("script")) {
+    const s = document.createElement("script");
+    s.textContent = old.textContent;
+    old.replaceWith(s);
+  }
+}
+
+renderMachines();
+renderPanels();
+renderAgents();
+renderTools();
+startStream();
+setInterval(renderAgents, 4000);
+</script>

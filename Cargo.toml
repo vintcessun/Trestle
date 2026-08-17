@@ -2,13 +2,11 @@
 resolver = "3"
 members = [
     "crates/trestle-core",
-    "crates/trestle-connectors",
-    "crates/trestle-base",
-    "crates/trestle-agent",
+    "crates/trestle-transport",
+    "crates/trestle-host",
     "crates/trestle-daemon",
     "crates/trestle-mcp",
     "crates/trestle-cli",
-    "crates/trestle-plugin-host",
 ]
 
 [workspace.package]
@@ -32,8 +30,10 @@ rmcp = { version = "3.1", features = ["server", "macros", "transport-io"] }
 # 纯 Rust SSH，async。支持把自定义流作为传输 —— Connector::dial 的返回值直接喂给它。
 russh = "0.62"
 russh-keys = "0.49"
-# 插件运行时，v0.3 才启用
-wasmtime = "47"
+# 插件运行时。component-model + async 是核心：插件要能并发调 host 导入
+# （fleet_status 同时打整支机队）。
+wasmtime = { version = "47", features = ["component-model", "async", "cranelift", "runtime"] }
+wasmtime-wasi = "47"
 
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "process", "time", "sync", "fs"] }
 tokio-tungstenite = "0.30"      # Monitor 的 WebSocket 服务端
@@ -50,6 +50,7 @@ clap = { version = "4", features = ["derive"] }
 async-trait = "0.1"
 sha2 = "0.11"
 base64 = "0.23"
+futures = "0.3"
 globset = "0.4"                 # 目录传输的 exclude 匹配
 directories = "6"               # daemon.json 的落点
 
@@ -58,8 +59,3 @@ lto = "thin"
 codegen-units = 1
 strip = true
 
-# 远端 agent 要小：它每次部署都要经 SSH 传过去
-[profile.agent]
-inherits = "release"
-opt-level = "z"
-panic = "abort"

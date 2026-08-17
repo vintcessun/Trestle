@@ -5,7 +5,7 @@
 > Trestle lets agents turn infrastructure friction into reusable capabilities.
 
 给 Coding Agent（Claude Code / Codex 等）用的远程基础设施运行时。它不是"又一个 SSH MCP 包装"——
-那条赛道已经很拥挤（`mcp-ssh-manager`、`bridge-mcp` 337 个工具）。Trestle 的赌注是另一个东西：
+那条赛道已经很拥挤。Trestle 的赌注是另一个东西：
 
 ```
 Agent 遇到摩擦  →  解决一次  →  固化成 capability  →  永久复用
@@ -13,65 +13,88 @@ Agent 遇到摩擦  →  解决一次  →  固化成 capability  →  永久复
         └──────────────── 下一个摩擦 ←────────────────────┘
 ```
 
-两条正交的抽象撑起整个系统：
+整个系统立在两句话上：
+
+> **1. 基本操作只有七个**：read / write / edit / shell / upload / download / forward。
+>
+> **2. connector 是一整块自包含的接入能力**——向上只暴露一个 name 和这七个操作，
+> 向下自己管连哪些机器、怎么连、断了怎么重试、远端 agent 怎么部署。
+> **上层永远不知道下面是 SSH 还是别的。**
+
+其余一切——任务管理、文件浏览、跨机搬运、全队概览、显卡、监视、Web UI——都是建在
+这七个操作之上的 **WASM 插件**。插件没有任何自己的 I/O：wasm 组件没有 syscall，
+它唯一能碰到外界的地方是 host 导入，而每个导入的入口处都有 capability 检查。
+
+## 现在能做什么
 
 ```
-                     Connector          │          Tool
-                  「怎么进去」          │      「进去干什么」
-        direct-ssh / socks5-vpn /       │   docker / nvidia / slurm /
-        jump-host / tailscale / ...     │   conda / systemd / ...
+$ trestle targets                    # 整支机队，按 connector 分组，秒回
+$ trestle exec gpu-4 "nvidia-smi"      # 热调用 36ms
+$ trestle call job_start '{"target":"gpu-4","command":"python train.py","gpus":"auto:2"}'
+$ trestle call monitor_open '{"timeout_secs":3600,"only_job":"train-..."}'
+$ trestle agents                     # 谁在线、在干什么、开着哪些转发
+$ trestle plugin new mytool          # 生成脚手架 → 编译 → reload → 变成常驻工具
 ```
 
-连接方式本身是可插拔能力，而不是"假设 shell 环境已经配好了"。这来自一个真实需求：
-一组组里的服务器中，`gpu-1` 在校园网内、**必须**经 VPN 才可达，其余三台公网直连——
-Agent 不应该每次都重新发现这件事。
+**摩擦 → capability 的闭环是真的**：`plugin new` 生成的脚手架不改一个字就编译通过，
+`plugin reload` 之后 Claude Code **不用重连**就能看到新工具。
 
-## 现在读什么
+## 实测（一支真实机队，2026-08-17）
+
+| | 稳态冷启动 | 热调用 | 自愈 |
+|---|---|---|---|
+| gpu-4 | 566ms | 36ms | 508ms |
+| gpu-1（经 VPN） | 2.4s | 55ms | 2.5s |
+| web-1 / web-2 | 1.0–1.2s | 26 / 116ms | ~1s |
+
+冷热差 36 倍——这就是为什么状态在 daemon 里而不在每个 MCP 会话里。
+
+## 文档
 
 | 文档 | 内容 |
 |---|---|
-| [docs/01-architecture.md](docs/01-architecture.md) | 分层架构、进程模型（daemon vs 单进程）、crate 划分、数据流 |
-| [docs/02-abstractions.md](docs/02-abstractions.md) | 四个核心抽象：Target / Connector / Session / Tool，以及 base 能力的精确签名 |
-| [docs/03-plugins-wit.md](docs/03-plugins-wit.md) | 插件模型、WIT 接口草案、capability 权限、为什么 v0.1 先不上 WASM |
-| [docs/04-mcp-surface.md](docs/04-mcp-surface.md) | 对外 MCP 工具面：命名、lazy load、list_changed、Claude Code 的具体行为 |
-| [docs/05-monitor.md](docs/05-monitor.md) | Monitor WebSocket 设计（含"必须传 timeout、到期自动关"规则） |
-| [docs/06-roadmap.md](docs/06-roadmap.md) | v0.1→v0.4 里程碑、每版验收标准、第一版范围边界 |
-| [docs/07-fleet-lessons.md](docs/07-fleet-lessons.md) | **从 Python 原型实测来的数据、整组机器代理实测表、四个必踩的坑** |
-| [docs/08-open-questions.md](docs/08-open-questions.md) | **开工前需要你拍板的 6 个决策点（都给了推荐）** |
-| [docs/reference/](docs/reference/) | 原始设计对话（ChatGPT，2130 行） |
+| [01-architecture.md](docs/01-architecture.md) | 全局图、四个设计支点、一次调用的完整数据流 |
+| [02-seven-operations.md](docs/02-seven-operations.md) | 七个基本操作，以及每一条为什么长这样 |
+| [03-connectors.md](docs/03-connectors.md) | connector 自包含什么、传输工具箱、远端 agent |
+| [04-plugins.md](docs/04-plugins.md) | 插件能看到什么、capability、怎么写一个 |
+| [05-monitor-and-ui.md](docs/05-monitor-and-ui.md) | Monitor 的 ws 契约、事件模型、Web UI |
+| [06-multi-agent.md](docs/06-multi-agent.md) | 在场感知、会话级资源、留言板、GPU 单点分配 |
+| [07-fleet-lessons.md](docs/07-fleet-lessons.md) | **实测数据与六个坑**（唯一从上一代继承的文档） |
+| [08-operating.md](docs/08-operating.md) | 构建、配置、接进 Claude Code、CLI、排查 |
 
-建议顺序：`01` → `07`（实测事实）→ `08`（拍板）→ `06`（范围）。其余按需。
+## 布局
 
-## 配置
+```
+crates/     core · transport · host · daemon · mcp · cli
+agent-py/   标准远端 agent（uv，常驻，只用标准库）
+plugins/    connectors/{gpu-cluster,cloud}
+            tools/{job,fs,xfer,fleet,monitor,hello-py}
+            templates/rust/   ← trestle plugin new 的模板
+wit/        插件接口（connector 与 tool-plugin 两个世界）
+```
 
-| 文件 | 说明 |
-|---|---|
-| [config/trestle.toml](config/trestle.toml) | 拓扑、connector 绑定、路径约定。**不含密码，可入库** |
-| `config/secrets.toml` | 真实凭据。**已 gitignore**，内容见 `secrets.example.toml` |
-| [config/secrets.example.toml](config/secrets.example.toml) | 凭据模板 |
-
-整组机器的真实拓扑和凭据已经迁移进来了（`secrets.toml` 不在 git 里）。
-
-## 技术选型（已核实版本，2026-08-17）
+## 技术选型（已核实版本）
 
 | 层 | 选择 | 版本 |
 |---|---|---|
-| MCP 前端 | [`rmcp`](https://crates.io/crates/rmcp)（官方 Rust SDK） | **3.1.2** |
-| SSH | [`russh`](https://crates.io/crates/russh)（纯 Rust，async） | **0.62.6** |
-| 插件运行时（v0.3+） | [`wasmtime`](https://crates.io/crates/wasmtime) + Component Model | **47.0.3** |
-| 异步 / HTTP / WS | `tokio` 1.53 / `axum` 0.8.9 / `tokio-tungstenite` 0.30 | — |
-| 本机工具链 | cargo 1.97.1 / rustc 1.97.1，`cross` 已装（**musl target 未装**，见 Q2） | — |
+| 插件运行时 | [`wasmtime`](https://crates.io/crates/wasmtime) + Component Model | 47.0.3 |
+| MCP 前端 | [`rmcp`](https://crates.io/crates/rmcp)（官方 Rust SDK） | 3.1.2 |
+| SSH | [`russh`](https://crates.io/crates/russh)（纯 Rust，async） | 0.62.6 |
+| 插件绑定 | `wit-bindgen` / `componentize-py` | 0.60 / 0.25 |
+| 异步 / HTTP / WS | `tokio` 1.53 / `axum` 0.8 / `tokio-tungstenite` 0.30 | — |
+| 远端 | python 3.9+（uv 固定版本，只用标准库） | — |
 
-完整依赖表在 [`Cargo.toml`](Cargo.toml) 的 `[workspace.dependencies]`，**已用 probe crate 跑通
-`cargo fetch`**（365 个包 resolve 干净）。workspace 骨架 `cargo check` 通过。
-各 crate 目前尚未引用这些依赖，所以 `cargo check` 不会去下载——开工时逐个启用。
+插件编到 `wasm32-wasip2`（Rust 插件约 150 KB，Python 插件约 18 MB）。
 
-⚠️ `docs/reference/` 里那份设计对话给的 rmcp 示例代码是 **2.x** 的，**已过时**（现在是 3.1.2，2.x→3.x 有
-breaking change）。宏名 `#[tool]` / `#[tool_router]` / `#[tool_handler]` 仍在，transport 只有
-**stdio** 和 **Streamable HTTP**（没有 WebSocket——所以 Monitor 的 ws 必须独立于 MCP）。
-开工时以 `cargo add rmcp` 后的实际签名为准，不要照抄那份文档里的代码。
+## 测试
 
-## 状态
+```powershell
+cargo test --workspace                              # 不需要真机
+wsl python3 agent-py/test_agent.py                  # 远端 agent 协议，61 项
+$env:TRESTLE_HOME = "<repo>\config"
+cargo test --workspace -- --ignored --test-threads=1  # 真机验收
+```
 
-**尚未开工**——本仓库当前只有设计文档、配置和接口草案。上一代 Python 实现在
-`D:\Scripts\fleet`（已从全局 MCP 注册移除，保留作移植参考，CLI 仍可应急使用）。
+真调测试默认 `#[ignore]`，因为它们真的会连服务器、真的起进程、真的传文件。
+但它们才是有价值的那部分——上一代靠「逐个工具真调」在 53 个工具里抓到过 1 个
+mock 测试永远抓不到的 bug。

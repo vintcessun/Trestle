@@ -1,88 +1,271 @@
-// Trestle 插件接口草案 (WIT / Component Model)
-//
-// 状态：草案。v0.1 不实现 WASM 宿主，但 Rust 侧的 trait 会按这个形状定义，
-// 这样 v0.3 接入 Wasmtime 时是"加一个 backend"，不是重构。
-//
-// 设计原则：插件**没有**任何自己的 I/O 能力。它能做的一切都必须经由 host 导入的
-// base 能力，且每次调用都由 host 按 manifest 里的 capability 检查。
-// 这是沙箱能成立的前提——如果插件能自己开 socket / 起进程，权限模型就是白做的。
-
 package trestle:plugin@0.1.0;
 
-/// host 提供给插件的基础能力。对应 Rust 侧唯一的 BaseService 实现。
-interface base {
-    record exec-result {
+/// 共享类型。
+interface types {
+    /// 给 agent 看的错误。`detail` 说清楚发生了什么，`remedy` 说下一步能做什么——
+    /// 两个都不是客套话：上一代实测下来，「在错误里指出正确的下一步」收益最大。
+    record error {
+        kind: error-kind,
+        detail: string,
+        remedy: string,
+    }
+
+    enum error-kind {
+        not-found,
+        permission-denied,
+        unreachable,
+        not-ready,
+        auth-failed,
+        timeout,
+        /// 请求已经发出去但没拿到响应。远端**可能已经执行过了**，
+        /// 所以绝不能自动重放。
+        unknown-state,
+        protocol,
+        invalid-request,
+        denied,
+        internal,
+    }
+
+    /// 一台机器。名字与用途说明来自配置，不由 connector 硬编码。
+    record target-info {
+        name: string,
+        host: string,
+        port: u16,
+        user: string,
+        workdir: string,
+        note: string,
+        aliases: list<string>,
+        agent-dir: string,
+        /// 归属的 connector。集约管理的单位就是它——`targets_list` 按它分组。
+        connector: string,
+    }
+
+    record health {
+        ok: bool,
+        detail: string,
+        remedy: string,
+        latency-ms: u64,
+    }
+
+    record exec-output {
         exit-code: s32,
         stdout: string,
         stderr: string,
-        timed-out: bool,
     }
 
-    record read-result {
-        content: string,
-        total-lines: u32,
-        truncated: bool,
-    }
-
-    variant edit-op {
-        literal(literal-edit),
-        regex(regex-edit),
-        lines(lines-edit),
-        insert(insert-edit),
-    }
-
-    record literal-edit { old: string, new: string, count: u32 }
-    record regex-edit   { pattern: string, replacement: string, count: u32, flags: string }
-    record lines-edit   { start: u32, end: u32, replacement: string }
-    record insert-edit  { before-line: u32, content: string }
-
-    /// 所有调用都必须显式指定 target —— 没有默认机
-    read:  func(target: string, path: string, start-line: option<u32>, max-lines: option<u32>)
-             -> result<read-result, string>;
-
-    write: func(target: string, path: string, content: string, append: bool)
-             -> result<u64, string>;
-
-    edit:  func(target: string, path: string, op: edit-op)
-             -> result<bool, string>;
-
-    /// 短命令，有超时；超时会杀掉整个进程组
-    shell-exec: func(target: string, command: string, cwd: option<string>, timeout-secs: option<u32>)
-             -> result<exec-result, string>;
-
-    /// 长任务，setsid 脱离；返回 job-id
-    shell-spawn: func(target: string, command: string, cwd: option<string>, name: option<string>)
-             -> result<string, string>;
+    /// 不透明句柄：指向 host 表里的一项。
+    ///
+    /// 用 u64 而不是 WIT `resource`，是因为我们只需要「一个数字」——
+    /// resource 带来的是所有权与 drop 语义，而这些句柄的生命周期本来就由
+    /// host 按会话管理，插件既不该也不能提前释放它们。
+    type stream-handle = u64;
+    type session-handle = u64;
+    type agent-handle = u64;
 }
 
-/// 插件向 host 发事件（会进 EventBus，最终到 Monitor 的 WebSocket）
-interface events {
-    enum level { debug, info, warn, error }
-    emit: func(lvl: level, message: string);
-    /// 长动作的进度，Monitor 可以据此画进度
-    progress: func(done: u32, total: u32, message: string);
+/// 传输工具箱：wasm 沙箱里跑不了的那部分。
+///
+/// 这里**只有机械动作**——搬字节、做加解密、分块校验。什么时候拉容器、走哪条路、
+/// 断了重试几次、agent 装在哪，全是 connector 插件的决定。
+///
+/// 之所以 SSH 留在 host，纯粹是因为 russh 建在 tokio 之上而 tokio 的 net 在
+/// wasi target 上不支持——不是因为它「属于」host。
+interface transport {
+    use types.{error, stream-handle, session-handle, agent-handle, exec-output};
+
+    /// 直连 TCP。
+    dial: func(addr: string, timeout-ms: u32) -> result<stream-handle, error>;
+
+    /// 经 SOCKS5 代理（no-auth）连到目标。
+    dial-socks5: func(proxy: string, addr: string, timeout-ms: u32) -> result<stream-handle, error>;
+
+    /// 探一个端口通不通。用于 ensure-ready 里判断代理起没起来。
+    probe-tcp: func(addr: string, timeout-ms: u32) -> bool;
+
+    /// 跑一条**本机**命令。`argv[0]` 必须在插件 manifest 的白名单里，
+    /// 否则拒绝并发一条 plugin-call-denied 事件。
+    local-exec: func(argv: list<string>) -> result<exec-output, error>;
+
+    /// 在一条已拨通的流上建立 SSH 并认证。
+    /// `creds-ref` 指向配置里的一项，明文密码不进插件。
+    ssh-connect: func(conn: stream-handle, target: string, host: string, port: u16,
+                      user: string, creds-ref: string) -> result<session-handle, error>;
+
+    /// 在 SSH 会话上跑一条命令并收全部输出（部署期的探测用，不是基本操作里的 shell）。
+    ssh-exec: func(session: session-handle, command: string) -> result<exec-output, error>;
+
+    ssh-alive: func(session: session-handle) -> bool;
+    ssh-close: func(session: session-handle);
+
+    /// 按内容哈希幂等地部署远端 agent 并接上它；已经在跑且版本一致就直接接管。
+    agent-ensure: func(session: session-handle, target: string, agent-dir: string)
+                  -> result<agent-handle, error>;
+
+    /// 给远端 agent 发一个操作。参数与返回都是 JSON 字符串。
+    agent-call: func(agent: agent-handle, op: string, payload: string) -> result<string, error>;
+
+    agent-alive: func(agent: agent-handle) -> bool;
+
+    /// 文件传输的分块与校验在 host 完成——插件没有本地文件系统权限，也不该有。
+    agent-upload: func(agent: agent-handle, local: string, remote: string, opts: string)
+                  -> result<string, error>;
+    agent-download: func(agent: agent-handle, remote: string, local: string, opts: string)
+                    -> result<string, error>;
+
+    /// 端口映射。**本地端口由 host 分配**，插件与调用方都不能指定。
+    forward-open: func(session: session-handle, remote-host: string, remote-port: u16)
+                  -> result<string, error>;
+
+    /// 记住这台机器的连接，供**同一个 connector 的其他实例**复用。
+    ///
+    /// 为什么需要这个：一个 wasm 实例在被调用期间是独占的，所以 host 会给每个
+    /// connector 起一个实例池，让打多台机器的操作能真并发。但「gpu-4 的连接」
+    /// 只该有一条——如果每个实例各存各的，六个实例就会建六条连接。
+    /// 所以连接归 host 按 connector 共享，插件只管记和取。
+    session-remember: func(target: string, session: session-handle, agent: agent-handle);
+    session-lookup: func(target: string) -> option<tuple<session-handle, agent-handle>>;
+    session-forget: func(target: string);
 }
 
-/// 插件必须导出的接口
-interface tools {
-    record tool-info {
-        name: string,          // 不带 namespace，host 会加前缀
-        description: string,
-        input-schema: string,  // JSON Schema 字符串
-    }
+/// host 服务：插件能看到的、base 之外的东西。
+interface host-services {
+    use types.{error, target-info};
 
-    /// 插件命名空间，如 "docker"。host 会把工具暴露成 docker_logs
-    namespace: func() -> string;
+    /// 机器清单。不建任何连接。
+    targets: func() -> list<target-info>;
 
-    /// 声明本插件提供哪些工具。host 启动时读一次（不实例化也能读，见 lazy 设计）
-    list: func() -> list<tool-info>;
+    /// 统一配置里属于我的那一节（JSON）。
+    config-get: func() -> string;
 
-    /// 执行。arguments 是 JSON 字符串，返回也是 JSON 字符串
-    call: func(name: string, arguments-json: string) -> result<string, string>;
+    /// 取一项凭据。值不落日志、不进事件。
+    secret-get: func(reference: string) -> result<string, error>;
+
+    /// per-plugin 持久化 KV，按插件名隔离，host 落盘。
+    state-get: func(key: string) -> option<string>;
+    state-set: func(key: string, value: string);
+    state-delete: func(key: string);
+    state-list: func(prefix: string) -> list<string>;
+
+    /// 往 EventBus 发事件 → tracing + Monitor + Web UI。
+    emit: func(level: string, kind: string, fields: string);
+
+    /// 时间与睡眠由 host 提供：插件里不该有自己的时钟，
+    /// 否则同一份插件在不同 host 上行为不一致。
+    now-ms: func() -> u64;
+    sleep-ms: func(ms: u32);
+
+    /// 要一个**主机侧**的临时文件路径（跨机搬运的中转站用）。
+    ///
+    /// 插件不能自己拼这个路径：它在 wasm 里看到的文件系统跟 host 的不是一回事，
+    /// 拼出来的 `/tmp/x` 在 Windows 主机上根本不存在。
+    staging-path: func(name: string) -> string;
 }
 
+/// 七个基本操作。技能插件通过它做事，host 按 target 路由到所属 connector。
+interface base {
+    use types.{error};
+
+    /// `op` 是七个基本操作之一；`payload` 与返回都是 JSON。
+    call: func(target: string, op: string, payload: string) -> result<string, error>;
+
+    /// 对多台机器并发执行同一个操作。
+    ///
+    /// 这不是「为了少写一个循环」——插件顺序调整支机队，冷启动时是六倍延迟。
+    /// 并发编排交给 host，插件只说要打哪几台。
+    call-many: func(targets: list<string>, op: string, payload: string) -> list<result<string, error>>;
+}
+
+/// 插件调插件。
+interface plugins {
+    use types.{error};
+    /// 调另一个插件已声明的工具。被调方必须出现在我的 manifest 里。
+    call: func(plugin: string, tool: string, args: string) -> result<string, error>;
+}
+
+/// 常驻监视：抢卡、等任务、等文件都靠它。
+interface tasks {
+    /// 注册一个周期任务。host 会按周期回调导出的 `on-tick`。
+    schedule: func(name: string, interval-ms: u32, payload: string);
+    cancel: func(name: string);
+}
+
+/// GPU 由 daemon 单点分配，插件不自己抢锁。
+///
+/// 分配器看到的是 `nvidia-smi` 的**真实占用**加上自己刚分配还没起来的预留，
+/// 所以别人绕过 Trestle 直接 ssh 上去占的卡也照样可见。
+interface gpu {
+    use types.{error};
+    /// 要 n 张卡。拿不到时错误里说清楚谁占着、干什么。
+    allocate: func(target: string, count: u32, purpose: string) -> result<list<u32>, error>;
+    release: func(target: string, devices: list<u32>);
+    /// 当前占用视图（JSON）。
+    view: func(target: string) -> result<string, error>;
+}
+
+/// 开一个 WebSocket 端点。monitor 插件靠它把 URL 交给 Claude Code。
+interface ws {
+    use types.{error};
+    /// `filter` 是 JSON：订阅哪个 target / job、quiet 与 alert 正则。
+    /// `timeout-secs` 必填——没有过期时间的监视端点会悄悄泄漏。
+    publish: func(filter: string, timeout-secs: u32) -> result<string, error>;
+}
+
+/// connector 插件：一整块自包含的接入能力。
+///
+/// 向上只有一个 name 和七个基本操作；向下自己管连哪些机器、怎么连、
+/// 长连接怎么维持、断了怎么重试、远端 agent 怎么部署。
+world connector {
+    import transport;
+    import host-services;
+
+    use types.{target-info, error, health};
+
+    /// 我管哪些机器。名字/用途由配置决定，这里只报拓扑。
+    export targets: func() -> list<target-info>;
+
+    /// 幂等地确保前置条件就绪（拉容器、拨 VPN、刷凭据）。每次建链前被调用，
+    /// 所以实现方自己做缓存——别每次真的去查 docker。
+    export ensure-ready: func() -> result<_, error>;
+
+    export health: func(target: string) -> health;
+
+    /// 七个基本操作的入口。
+    ///
+    /// 用 `(op, json)` 而不是七个具名函数，是为了让插件与 host 松耦合：
+    /// 给 `read` 加一个可选参数不需要改 WIT、不需要重编译所有插件。
+    /// 外部插件要能长期活着，这个代价值得付。
+    export op: func(target: string, op: string, payload: string) -> result<string, error>;
+
+    /// 我需要哪些配置项（JSON Schema）。Web UI 据此渲染出配置表单。
+    export config-schema: func() -> string;
+}
+
+/// 技能插件：建在七个基本操作之上。
 world tool-plugin {
     import base;
-    import events;
-    export tools;
+    import host-services;
+    import plugins;
+    import tasks;
+    import gpu;
+    import ws;
+
+    use types.{error};
+
+    /// 我提供哪些工具（JSON：名字 + 描述 + JSON Schema）。
+    /// host 启动时读一次就进 registry，真正的实例化延迟到第一次调用。
+    export list-tools: func() -> string;
+
+    export call: func(tool: string, args: string) -> result<string, error>;
+
+    /// 周期任务回调。没注册过 tasks 的插件返回空实现即可。
+    export on-tick: func(name: string, payload: string);
+
+    export config-schema: func() -> string;
+
+    /// 这个插件在 Web UI 上的面板（一段 HTML 片段）。返回空串表示不要面板。
+    ///
+    /// Web UI 因此是**插件的一部分**而不是一个独立前端工程：加一个插件，
+    /// 它自己带着自己的那块界面进来，host 只负责挂载。
+    /// 片段里可以用 host 提供的 `/api/*` 与 `/events`。
+    export ui-panel: func() -> string;
 }

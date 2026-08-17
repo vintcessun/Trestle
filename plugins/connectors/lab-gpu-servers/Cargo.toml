@@ -1,0 +1,21 @@
+# 这个插件不属于主 workspace —— 它编到 wasm32-wasip2，和 host 的 target 不同。
+[workspace]
+
+[package]
+name = "gpu-cluster"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.60"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

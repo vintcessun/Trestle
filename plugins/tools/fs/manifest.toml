@@ -1,0 +1,7 @@
+name = "fs"
+version = "0.1.0"
+kind = "tool"
+description = "远端文件系统的查看：列目录、查找、看大小"
+
+# 全部建在 base.shell 上，不需要任何额外权限。
+[capabilities]

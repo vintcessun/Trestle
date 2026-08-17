@@ -1,0 +1,14 @@
+name = "{{NAME}}"
+version = "0.1.0"
+kind = "tool"
+description = "{{DESCRIPTION}}"
+
+# 这个插件能做什么，就这些。host 在每个导入的入口处强制，插件绕不过去——
+# wasm 组件没有 syscall，那些导入是它唯一能碰到外界的地方。
+#
+# 默认什么额外权限都不给：七个基本操作是白送的，别的要自己写上来。
+[capabilities]
+# gpu = true            # 向 GPU 分配器要卡
+# tasks = true          # 注册周期任务（抢卡、等文件）
+# ws = true             # 开 WebSocket 端点给 Monitor
+# call_plugins = ["fleet"]   # 调别的插件的工具

@@ -1,0 +1,136 @@
+//! `{{NAME}}`：{{DESCRIPTION}}
+//!
+//! 这是 `trestle plugin new` 生成的脚手架，**开箱即编译通过**。
+//! 改 `list_tools` 声明你的工具，改 `call` 实现它们。
+//!
+//! 你能用的东西：
+//!   * `base::call(target, op, json)` —— 七个基本操作
+//!     （read / write / edit / shell / upload / download / forward）
+//!   * `base::call_many(targets, op, json)` —— 对多台机器**并发**执行同一个操作。
+//!     别自己写循环：一个 wasm 实例同时只能进一个调用，循环六次就是六倍延迟。
+//!   * `host::state_get/set` —— 你自己的持久化 KV（按插件名隔离）
+//!   * `host::emit` —— 发事件，会进 Monitor 与 Web UI
+//!   * `host::targets` —— 有哪些机器
+//!
+//! 你**够不到**的东西：SSH、本机进程、网络、别的插件的数据。
+//! 那不是疏漏，是权限模型：插件只能通过 base 做事。需要更多就在 `manifest.toml`
+//! 里声明，host 会在导入的入口处强制。
+
+#[allow(warnings)]
+mod bindings {
+    wit_bindgen::generate!({
+        path: "{{WIT_PATH}}",
+        world: "tool-plugin",
+    });
+}
+
+use bindings::trestle::plugin::base;
+use bindings::trestle::plugin::host_services as host;
+use bindings::trestle::plugin::types::{Error, ErrorKind};
+use bindings::Guest;
+
+fn err(kind: ErrorKind, detail: impl Into<String>, remedy: impl Into<String>) -> Error {
+    Error {
+        kind,
+        detail: detail.into(),
+        remedy: remedy.into(),
+    }
+}
+
+struct Component;
+
+impl Guest for Component {
+    fn list_tools() -> String {
+        serde_json::json!([
+            {
+                "name": "{{NAME}}_hello",
+                "description": "示例工具：在目标机器上跑一条命令并回显。",
+                "input_schema": {
+                    "type": "object",
+                    // `target` 必须是 required —— 没有默认机是刻意的：
+                    // 默认机会制造「你以为在 A 上删文件、其实在 B」这类静默事故。
+                    "required": ["target"],
+                    "properties": {
+                        "target": {"type": "string", "description": "机器名，必填"},
+                        "message": {"type": "string", "default": "hello from {{NAME}}"}
+                    }
+                }
+            }
+        ])
+        .to_string()
+    }
+
+    fn call(tool: String, args: String) -> Result<String, Error> {
+        let v: serde_json::Value = serde_json::from_str(&args).map_err(|e| {
+            err(
+                ErrorKind::InvalidRequest,
+                format!("arguments are not valid JSON: {e}"),
+                "",
+            )
+        })?;
+
+        match tool.as_str() {
+            "{{NAME}}_hello" => {
+                let target = v["target"].as_str().ok_or_else(|| {
+                    err(
+                        ErrorKind::InvalidRequest,
+                        "this tool needs a `target`; there is no default machine",
+                        "trestle targets",
+                    )
+                })?;
+                let message = v["message"].as_str().unwrap_or("hello from {{NAME}}");
+
+                let out = base::call(
+                    target,
+                    "shell",
+                    &serde_json::json!({
+                        "command": format!("echo {}", shell_quote(message)),
+                        "timeout_secs": 20
+                    })
+                    .to_string(),
+                )?;
+
+                host::emit(
+                    "info",
+                    "{{NAME}}_hello",
+                    &serde_json::json!({"target": target}).to_string(),
+                );
+
+                let r: serde_json::Value = serde_json::from_str(&out).unwrap_or_default();
+                Ok(serde_json::to_string(&serde_json::json!({
+                    "target": target,
+                    "said": r["stdout"].as_str().unwrap_or("").trim(),
+                }))
+                .unwrap_or_default())
+            }
+
+            other => Err(err(
+                ErrorKind::NotFound,
+                format!("unknown tool '{other}'"),
+                "{{NAME}}_hello",
+            )),
+        }
+    }
+
+    /// 周期任务的回调。没在 manifest 里开 `tasks` 就永远不会被调到。
+    fn on_tick(_name: String, _payload: String) {}
+
+    /// 这个插件在 Web UI 上的面板（一段 HTML 片段）。空串表示不要面板。
+    /// 片段里可以用 host 的 `/api/*` 与 `/events`。
+    fn ui_panel() -> String {
+        String::new()
+    }
+
+    /// Web UI 据此渲染这个插件的配置表单。
+    fn config_schema() -> String {
+        serde_json::json!({"type": "object", "properties": {}}).to_string()
+    }
+}
+
+/// 把一段文本包成 shell 的单引号参数。
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+bindings::export!(Component with_types_in bindings);
+

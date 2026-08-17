@@ -1,0 +1,7 @@
+name = "xfer"
+version = "0.1.0"
+kind = "tool"
+description = "跨机搬运：服务器之间经本地中转、一份文件分发到多台"
+
+# 只做编排，分块与校验都在 base.upload/download 里。
+[capabilities]

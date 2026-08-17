@@ -1,0 +1,6 @@
+name = "hello-py"
+version = "0.1.0"
+kind = "tool"
+description = "验证 Python 也能写 Trestle 插件"
+
+[capabilities]

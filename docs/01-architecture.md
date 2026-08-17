@@ -1,163 +1,150 @@
 # 01 · 架构
 
+整个系统立在两句话上。
+
+> **1. 基本操作只有七个**：read / write / edit / shell / upload / download / forward。
+>
+> **2. connector 是一整块自包含的接入能力**——向上只暴露一个 name 和这七个操作，
+> 向下自己管连哪些机器、怎么连、长连接怎么维持、断了怎么重试、远端 agent 怎么部署。
+> **上层永远不知道下面是 SSH 还是别的。**
+
+其余一切——任务管理、文件浏览、跨机搬运、全队概览、显卡、监视、Web UI——都是建在
+这七个操作之上的 WASM 插件。
+
 ## 全局图
 
 ```
-   Claude Code (会话 A)      Claude Code (会话 B)         你的终端
-          │                         │                        │
-     MCP stdio                 MCP stdio                    CLI
-          │                         │                        │
-   ┌──────┴────────┐        ┌───────┴───────┐        ┌───────┴───────┐
-   │ trestle-mcp   │        │ trestle-mcp   │        │   trestle     │   ← 瘦客户端
-   └──────┬────────┘        └───────┬───────┘        └───────┬───────┘
-          │                         │                        │
-          └─────────────────────────┼────────────────────────┘
-                                    │  IPC (localhost / named pipe)
-                                    ▼
-            ┌───────────────────────────────────────────────┐
-            │                 trestled                      │   ← 常驻 daemon
-            │                                               │      (lazy 启动)
-            │   ToolRegistry ── Router ── EventBus ──► WS ──────► Monitor
-            │        │                                      │
-            │   ┌────┴─────┐                                │
-            │   │ BaseSvc  │  read / write / edit / shell    │
-            │   └────┬─────┘                                │
-            │        │                                      │
-            │   SessionPool ── 一台机器一条常驻连接         │
-            │        │                                      │
-            │   ConnectorRegistry                           │
-            │     ├── direct-ssh                            │
-            │     ├── socks5  (拉起 VPN 容器 → SOCKS5 dial) │
-            │     └── <plugin>.wasm        (v0.3+)          │
-            │        │                                      │
-            │   PluginRegistry (tools)     (v0.3+)          │
-            └────────┼──────────────────────────────────────┘
-                     │
-              ┌──────┴───────┬──────────┬──────────┐
-              ▼              ▼          ▼          ▼
-         gpu-1(VPN)          gpu-2         gpu-3        gpu-4
-              │              │          │          │
-         每台一个常驻 remote agent（静态二进制，自动部署）
+      Claude Code A      Claude Code B        终端        浏览器
+           │                  │                │            │
+       MCP stdio          MCP stdio           CLI        HTTP/ws
+           └──────────────────┴────────────────┴────────────┘
+                               │ IPC (127.0.0.1 + token)
+                               ▼
+┌───────────────────────────────────────────────────────────────────┐
+│                            trestled                               │
+│  ConfigStore · AgentRegistry（会话 + forward 归属）                │
+│  GpuArbiter（单点分配）· Noticeboard（TTL）· TaskScheduler         │
+│  EventBus · Monitor ws · Web UI 挂载 · 状态落盘与懒恢复            │
+│                                                                   │
+│  ┌──────────────── WASM Host (wasmtime 47) ────────────────────┐  │
+│  │  capability 强制 · 实例池 · target → connector 路由          │  │
+│  │                                                             │  │
+│  │   plugins/tools/*.wasm            plugins/connectors/*.wasm │  │
+│  │   job·fs·xfer·fleet·monitor         gpu-cluster         │  │
+│  │        │                            cloud              │  │
+│  │        │ 调七个基本操作                      ▲               │  │
+│  │        └────► Router: target → connector ───┘ 实现七个基本操作│  │
+│  └──────────────────────────────────┬──────────────────────────┘  │
+│                                     │ 传输工具箱（host native）    │
+│            net.dial · socks5 · ssh.session · local.exec · deploy  │
+└─────────────────────────────────────┬─────────────────────────────┘
+                                      │
+        ┌──────────┬──────────┬───────┴───┬────────────┬────────────┐
+      gpu-1        gpu-2        gpu-3         gpu-4      198.51.100.10  198.51.100.20
+        └──────────── 标准 agent-py（uv，常驻，JSON-Lines 多路复用）────────┘
 ```
 
-## 三个设计支点
+## 四个设计支点
 
 ### 1. daemon 与前端分离
 
-`trestle-mcp`（MCP stdio 服务）和 `trestle`（CLI）都是**瘦客户端**，真正的状态在 `trestled`。
+`trestle-mcp` 和 `trestle` 都是**瘦客户端**，真正的状态在 `trestled`。
 
-这是从 Python 原型实测出来的教训：MCP server 由 Claude Code 按 stdio 拉起，**每个会话一个进程**，
-于是每开一个会话就要重新建 4 条 SSH（gpu-1 经 VPN 冷启动 ~5s）。而 daemon 模式下：
+这不是洁癖：MCP server 由 Claude Code 按 stdio 拉起，**每个会话一个进程**。状态放在
+前端的话，每开一个会话就要把全部连接重建一遍（gpu-1 经 VPN 实测 2.4 秒）。有了 daemon：
 
 * 连接**真正**只建一次，跨会话、跨 CLI 复用；
-* Monitor 的 ws、后台 job、插件实例都有唯一归属，CLI 和 MCP 看到同一份状态；
-* 满足你要的"一次 CLI 或一次 MCP 调用就启动后台常驻进程，lazy 加载"。
+* Monitor 的 ws、后台任务、插件实例、GPU 分配都有唯一归属；
+* 一个 agent 能看见别的 agent 在干什么。
 
-**lazy 启动**：任一客户端连不上 daemon 就自己 spawn 它（带锁防并发重复拉起），daemon 就绪后重试。
-用户永远不需要手动 `trestled start`。
+**lazy 启动**：任一客户端连不上就自己 spawn 它，用户永远不需要手动 `trestled start`。
+**idle 退出**：没人连着也没活儿干，超过 `idle_timeout_secs` 就自行退出。
 
-**idle 退出**：daemon 无客户端连接且无活跃 job 超过 N 分钟后自行退出（默认 30min，可配 0 表示常驻）。
+### 2. host 是工具箱，插件是编排
 
-> 代价：多一层 IPC，调试链路变长。见 `08-open-questions.md` Q1——如果你不接受这个复杂度，
-> 备选是"MCP server 进程内嵌一切"，那样简单但回到 Python 版每会话重连的老问题。
+host 提供的是**机械动作**——搬字节、做加解密、分块校验、按哈希部署。
+什么时候拉容器、走哪条路、断了重试几次、agent 装在哪，全是 connector 插件的决定。
 
-### 2. base 能力只实现一次
+之所以 SSH 留在 host，纯粹是因为 russh 建在 tokio 之上而 tokio 的 `net` 在 wasi target
+上不支持（[russh#224](https://github.com/Eugeny/russh/issues/224)、
+[tokio#6526](https://github.com/tokio-rs/tokio/discussions/6526)）——**不是因为它「属于」host**。
+所以架构里没有 `ssh.wasm` 这个格子：SSH 是某个 connector 的内部实现细节，不是一层。
 
-```
-                    BaseService  (read / write / edit / shell)
-                          │
-          ┌───────────────┼────────────────┐
-          ▼               ▼                ▼
-     MCP adapter     WIT adapter      CLI adapter
-     base_read()     base.read()      trestle read
-```
+### 3. 插件没有任何自己的 I/O
 
-MCP 工具、WASM 插件、CLI 三条路径调的是**同一份实现**。插件不会有"第二套 read"。
-
-### 3. Connector 与 Tool 正交
+wasm 组件没有 syscall。插件唯一能碰到外界的地方就是 host 导入，而每个导入的入口处
+都有 capability 检查。所以「插件只能通过基本操作做事」不是约定，是**真的强制**。
 
 ```
-Connector : Target → Session          「怎么进去」
-Tool      : Session → 领域动作         「进去干什么」
+                          ✗ 插件自己开 socket / 起进程 / 读文件
+plugin.wasm ──────────────────────────────────────────────► OS
+     │
+     │ ✓ 唯一出口：host 导入
+     ▼
+  base 七操作 / host 服务 ── capability 检查 ──► connector ──► 远程机器
 ```
 
-Connector 的最小契约其实只有一件事——**给我一个能连到目标的字节流**：
+被拒绝的调用会发一条 `plugin_call_denied` 事件——否则权限模型就是个黑盒，
+出问题时没人知道是被挡了还是根本没调。
 
-```rust
-#[async_trait]
-pub trait Connector: Send + Sync {
-    fn name(&self) -> &str;
-    /// 确保前置条件就绪（拨 VPN、拉容器、刷新凭据…），幂等，可被反复调用
-    async fn ensure_ready(&self) -> Result<()>;
-    /// 返回一条已连到 (host, port) 的双向流
-    async fn dial(&self, host: &str, port: u16) -> Result<Box<dyn Stream>>;
-}
-```
+### 4. 并发在 host 侧
 
-于是 **VPN 不是特例，而是一个 dialer 装饰器**：`socks5` connector 的 `ensure_ready` 负责把
-VPN 容器拉起来、`dial` 负责走 SOCKS5 CONNECT；SSH 层拿到流之后完全不关心它从哪来。
-这正是 Python 原型里跑通的语义，Rust 版只是把它显式化成 trait。
+一个 wasm 实例被调用期间是独占的。所以：
+
+* 每个 connector 起一个**实例池**（默认 4），实例之间**共享连接**——
+  否则四个实例会对同一台机器建四条连接；
+* 插件要打多台机器时调 `base.call-many`，由 host 并发扇出。
+  自己写循环打整队，在冷启动时就是六倍延迟。
 
 ## Crate 划分
 
 ```
-trestle/
-├── crates/
-│   ├── trestle-core        # Target/Connector/Session/Tool 抽象、错误类型、事件定义
-│   ├── trestle-connectors  # direct-ssh、socks5（内置实现）
-│   ├── trestle-base        # BaseService：read/write/edit/shell 的唯一实现
-│   ├── trestle-agent       # 远端常驻 agent（编译成静态二进制推到服务器上）
-│   ├── trestle-daemon      # trestled：SessionPool、Registry、EventBus、WS、IPC server
-│   ├── trestle-mcp         # MCP stdio 前端（rmcp），瘦客户端
-│   ├── trestle-cli         # trestle 命令行，瘦客户端
-│   └── trestle-plugin-host # Wasmtime + WIT 宿主 (v0.3+，先留空壳)
-├── wit/                    # 插件接口定义
-├── config/
-└── docs/
+crates/
+  trestle-core        抽象、错误、事件、ConfigStore
+  trestle-transport   传输工具箱：TCP/SOCKS5、russh、hash 幂等部署、direct-tcpip
+  trestle-host        WASM 宿主：wasmtime、capability、实例池、target→connector 路由
+  trestle-daemon      trestled：IPC、EventBus、协同层、ws、Web UI、状态持久化
+  trestle-mcp         MCP stdio 前端（rmcp 3.1），瘦客户端
+  trestle-cli         trestle 命令行，瘦客户端
+agent-py/             标准远端 agent（uv），七个操作的远端一侧
+plugins/
+  connectors/         gpu-cluster · cloud
+  tools/              job · fs · xfer · fleet · monitor · hello-py
+  templates/rust/     `trestle plugin new` 的脚手架
+wit/trestle.wit       插件接口（connector 与 tool-plugin 两个世界）
 ```
 
-依赖方向严格单向：`core ← {connectors, base, daemon}`，`daemon ← {mcp, cli}`（经 IPC，不是直接链接）。
-`trestle-agent` **不依赖** core 以外的任何东西——它要能静态编译成一个小二进制。
+依赖方向严格单向：`core ← {transport, host}`，`host ← daemon`，`daemon ← {mcp, cli}`。
 
 ## 一次调用的完整数据流
 
-以 `docker_logs(target="gpu-4", container="foo")` 为例（v0.3 有插件之后）：
+以 `job_start(target="gpu-4", command="python train.py", gpus="auto:2")` 为例：
 
 ```
 Claude Code
-   │ tools/call docker_logs
+   │ tools/call job_start
    ▼
 trestle-mcp ──IPC──► trestled
-                        │ Router: 前缀 docker.* → PluginRegistry
-                        │ 插件未实例化 → lazy instantiate docker.wasm
+                        │ ToolRegistry: job_start → job.wasm
                         ▼
-                    docker.wasm 调用 host 导入的 base.shell(target, "docker logs foo")
+                    job.wasm
+                        │ gpu.allocate("gpu-4", 2)   ← host 单点仲裁，排队而不是抢锁
+                        │ base.call("gpu-4", "shell", {detach:true, env:{CUDA_VISIBLE_DEVICES}})
+                        ▼
+                    Router: gpu-4 → gpu-cluster.wasm
+                        ▼
+                    gpu-cluster.wasm
+                        │ session-lookup("gpu-4") → 有活连接就直接用
+                        │ 没有：probe 11080 → local.exec(docker start) → dial-socks5
+                        │       → ssh.connect → agent.ensure（按 hash 幂等部署）
+                        ▼
+                    agent.call(handle, "shell", …)
+                        ▼
+                    远端 agent-py：setsid 起进程，pid/rc/日志落盘
                         │
+                        ├──► EventBus ──► Monitor ws / Web UI
                         ▼
-                    BaseService.shell
-                        │ SessionPool.get("gpu-4")
-                        │   └─ 无连接 → Connector("socks5").ensure_ready() → dial → SSH → 部署/拉起 agent
-                        ▼
-                    remote agent 执行，JSON-Lines 回传
-                        │
-                        ├──► EventBus: ShellStarted/ShellFinished ──► WS ──► Monitor
-                        ▼
-                    结果回 MCP
+                    结果一路回到 Claude Code
 ```
 
-注意插件**没有**自己的 SSH 能力，它只能通过 host 导入的 base 能力做事——这是权限模型成立的前提
-（见 `03-plugins-wit.md`）。
-
-## 远端侧
-
-每台机器上跑一个 **remote agent**：常驻进程，一条连接上跑 JSON-Lines 请求/响应，多路复用 + 并发。
-这是 Python 原型验证过的形态，实测**冷启动 0.7–5s、之后每次调用 33–52ms**。
-
-为什么要有远端 agent，而不是每次 `ssh host "command"`：
-
-* **每次新建 SSH exec channel + 起一个进程**，跨 VPN 时是几百 ms 起步，agent 模式是一次 RTT；
-* `edit` 这类原语必须在**远端本地**执行才有意义（否则要把整个文件拉过来改完再传回去）；
-* 后台 job 的 pid/退出码/日志需要一个有状态的守护者。
-
-形态选择（**待拍板，见 Q2**）：静态编译的 Rust 二进制（musl，单文件，无运行时依赖）是推荐项，
-按内容哈希幂等部署——本地算 hash，远端比对不一致才重传。
+注意 `job.wasm` **没有** SSH 能力——它只是调了 `base.call`。这是权限模型成立的前提。

@@ -1,0 +1,8 @@
+name = "fleet"
+version = "0.1.0"
+kind = "tool"
+description = "全队视角：状态概览、广播执行、跨机挑卡"
+
+[capabilities]
+# 要看 GPU 占用视图。分配本身仍由 host 单点仲裁。
+gpu = true

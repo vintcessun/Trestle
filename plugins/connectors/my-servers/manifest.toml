@@ -1,0 +1,10 @@
+name = "cloud"
+version = "0.1.0"
+kind = "connector"
+description = "自己的服务器，标准 SSH 直连 + 公钥登录"
+
+# 直连，什么本机命令都不需要跑 —— 空白名单意味着 local_exec 一律被拒。
+[capabilities]
+local_exec = []
+dial = []
+forward = true
