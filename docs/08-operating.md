@@ -76,17 +76,34 @@ key_path = "~/.ssh/id_ed25519"
 
 connector 与插件通过 `config-schema()` 声明自己需要哪些字段，Web UI 据此渲染表单。
 
-## 接进 Claude Code
+## 接进 Claude Code 与 Codex
 
-```json
-{
-  "mcpServers": {
-    "trestle": { "command": "<程序目录>/trestle-mcp.exe" }
-  }
-}
+`install.ps1 -Register` 已经做了，等价于：
+
+```powershell
+claude mcp add trestle -s user -e TRESTLE_AGENT=claude-code -- <程序目录>	restle-mcp.exe
+codex  mcp add trestle    --env TRESTLE_AGENT=codex        -- <程序目录>	restle-mcp.exe
 ```
 
 不需要先起 daemon——前端连不上会自己把它拉起来。
+
+`TRESTLE_AGENT` 决定这个会话在 `agents_list` 里叫什么。写错的话 Codex 的会话
+会在留言板上冒充 Claude Code，而多 agent 协同的全部意义就是知道对面是谁。
+
+**怎么教 agent 用好它**，两条路：
+
+* **Claude Code**：`.claude/skills/trestle/SKILL.md`，`-Register` 会装到
+  `~\.claude\skills\`。按需加载，不占常驻上下文。
+* **所有客户端（含 Codex）**：MCP 的 `instructions` 字段。Codex 没有 skill，
+  所以那段是它唯一的机会——里面只放"不知道就会做错"的事
+  （没有默认机、长任务用 job、要卡用 gpu_acquire、unknown state 不要重试）。
+
+查一眼：
+
+```powershell
+claude mcp list
+codex mcp list
+```
 
 ## CLI
 

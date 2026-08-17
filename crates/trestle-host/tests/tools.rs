@@ -103,6 +103,14 @@ async fn the_tool_surface_includes_base_and_plugin_tools() {
             "missing {expected}: {names:?}"
         );
     }
+    // 协同层。它们曾经只有 CLI 能用，于是「多个 agent 互相知道在干什么」
+    // 对 MCP 里的 agent 完全不存在——而那正是需要它的地方。
+    for expected in ["agents_list", "notes_list", "note_put"] {
+        assert!(
+            names.contains(&expected.to_string()),
+            "the coordination layer must be reachable as a tool, not just from the CLI;              missing {expected}: {names:?}"
+        );
+    }
     assert!(events.saw("plugin_loaded"));
 }
 

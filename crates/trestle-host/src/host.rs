@@ -239,9 +239,10 @@ impl TrestleHost {
         self.tools.call(tool, args).await
     }
 
-    /// 对外的完整工具面：七个基本操作 + host 内置 + 插件贡献的。
+    /// 对外的完整工具面：七个基本操作 + 协同层 + 插件贡献的。
     pub async fn tool_descriptors(&self) -> Vec<crate::tools::ToolDescriptor> {
         let mut out = base_tool_descriptors();
+        out.extend(coord_tool_descriptors());
         out.extend(self.tools.descriptors().await);
         out
     }
@@ -351,6 +352,61 @@ pub fn base_tool_descriptors() -> Vec<crate::tools::ToolDescriptor> {
         serde_json::json!({"target": target, "remote_port": {"type": "integer"}}),
     );
     out
+}
+
+/// 协同层的工具声明：在场感知与留言板。
+///
+/// 它们和七个基本操作一样是 **host 自己的面**，不是插件——它们读写的是 daemon
+/// 的会话表与留言板，而插件够不到那些（也不该够得到）。
+///
+/// 之前它们只有 CLI 能用，于是「多个 agent 互相知道在干什么」这件事对
+/// **MCP 里的 agent 完全不存在**——而那正是需要它的地方：CLI 前面坐着人，
+/// 人自己知道自己在干什么。
+pub fn coord_tool_descriptors() -> Vec<crate::tools::ToolDescriptor> {
+    use crate::tools::ToolDescriptor;
+    vec![
+        ToolDescriptor {
+            name: "agents_list".into(),
+            description: "谁在线、最近在哪台机器上做了什么、开着哪些端口转发。\
+                          动手改一台机器之前值得看一眼——别的 agent 可能正在上面干活。"
+                .into(),
+            input_schema: serde_json::json!({"type": "object", "properties": {}}),
+        },
+        ToolDescriptor {
+            name: "notes_list".into(),
+            description: "看留言板：别的 agent 说了自己在占用什么。".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "only_scope": {
+                        "type": "string",
+                        "description": "只看这个范围（机器名或自定义标签）。不给就看全部。\
+                                        这是过滤条件，不是操作对象。"
+                    }
+                }
+            }),
+        },
+        ToolDescriptor {
+            name: "note_put".into(),
+            description: "留一句话给别的 agent：你在占用什么、大概到什么时候。\
+                          它是**提示**不是锁——「我在 /data/exp1 上跑实验别动」这种意图\
+                          本来就不该用锁表达。"
+                .into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "required": ["scope", "text", "ttl_secs"],
+                "properties": {
+                    "scope": {"type": "string", "description": "机器名，或者一个自定义标签。"},
+                    "text": {"type": "string"},
+                    "ttl_secs": {
+                        "type": "integer",
+                        "description": "多久之后自动消失。**必填**——没有过期时间的留言板\
+                                        几个星期就会变成垃圾堆，然后谁都不看了。"
+                    }
+                }
+            }),
+        },
+    ]
 }
 
 /// 技能插件目录：先看程序目录下的，开发时退回仓库里的那份。

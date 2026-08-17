@@ -10,6 +10,9 @@ config/trestle.toml
 
 !*.example.*
 
+# 安装产物。scripts\install.ps1 生成，里面有配置与凭据的副本。
+/dist/
+
 # Rust
 /target/
 plugins/**/target/

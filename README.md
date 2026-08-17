@@ -25,6 +25,22 @@ Agent 遇到摩擦  →  解决一次  →  固化成 capability  →  永久复
 这七个操作之上的 **WASM 插件**。插件没有任何自己的 I/O：wasm 组件没有 syscall，
 它唯一能碰到外界的地方是 host 导入，而每个导入的入口处都有 capability 检查。
 
+## 装它
+
+```powershell
+.\scripts\install.ps1 -Register
+```
+
+编、装成一个自包含的目录（`dist\`）、注册给 Claude Code 与 Codex。重开一个会话就有了。
+
+装出来的目录是自包含的：三个可执行文件、配置、凭据、插件、状态全在一起——
+`trestle-mcp` 要能在自己旁边找到 `trestled`，散着放这条链就断了。已有的
+`trestle.toml` / `secrets.toml` **绝不会被覆盖**。
+
+怎么教 agent 用好它：Claude Code 读 `.claude/skills/trestle/SKILL.md`（`-Register`
+会装到 `~\.claude\skills\`）；Codex 没有 skill，所以同样的要点放在 MCP 的
+`instructions` 里，两边都拿得到。
+
 ## 现在能做什么
 
 ```

@@ -685,7 +685,10 @@ async fn connect_or_spawn(root: &std::path::Path) -> anyhow::Result<IpcClient> {
     cmd.spawn()
         .map_err(|e| anyhow::anyhow!("cannot start {}: {e}", exe.display()))?;
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    // 等它就绪。**第一次**要把全部插件从头编一遍——componentize-py 产出的那个
+    // 组件是 18 MB，冷缓存下这一步就要一分多钟，而它恰好发生在「刚装完、第一次用」
+    // 的时刻。给 30 秒等于保证第一次必然失败。之后有编译缓存，都是一两秒。
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
     let mut wait = std::time::Duration::from_millis(120);
     while std::time::Instant::now() < deadline {
         tokio::time::sleep(wait).await;
