@@ -1,6 +1,34 @@
 # 08 · 怎么跑起来
 
-## 构建
+## 一条命令装完
+
+```powershell
+.\scripts\install.ps1 -Register     # Windows
+```
+
+```bash
+./scripts/install.sh --register     # Linux / macOS
+```
+
+它做五件事：编（含插件编到 wasm）、装成一个自包含的目录（默认 `dist/`）、
+把配置与凭据搬过去（已存在就不覆盖）、把 CLI 放进 PATH、注册给 Claude Code 与 Codex。
+
+| 参数 | 作用 |
+|---|---|
+| `-Register` / `--register` | 注册给两个客户端 |
+| `-Only codex` / `--only codex` | 只注册一个 |
+| `-SkipBuild` / `--skip-build` | 不重编，只重新装配 |
+| `-Dest` / `--dest` | 装到别处 |
+| `-Uninstall` / `--uninstall` | 注销并停掉 daemon（配置与凭据保留） |
+
+为什么必须"装"而不是直接跑 `target/release/trestle-mcp`：`trestle-mcp` 要在
+**自己旁边**找到 `trestled`（它负责把 daemon 拉起来），配置、插件与状态也默认
+在同一个目录。散着放这条链就断了。
+
+PATH 里只放 CLI。`trestled` 与 `trestle-mcp` 是靠"和调用者同目录"被找到的，
+不需要进 PATH；软链解析之后 `current_exe()` 仍然指向安装目录，所以照样找得到。
+
+## 手动构建
 
 ```powershell
 cargo build --release              # 三个二进制：trestled / trestle / trestle-mcp
@@ -13,6 +41,18 @@ cargo build --release              # 三个二进制：trestled / trestle / tres
 rustup target add wasm32-wasip2
 uv tool install componentize-py    # 只有要写 Python 插件才需要
 ```
+
+## 在 WSL 里跑 Linux 那一份
+
+```bash
+cd /mnt/d/.../Trestle
+export CARGO_TARGET_DIR=$HOME/trestle-target   # ← 这一行不能省
+cargo test --workspace
+```
+
+`CARGO_TARGET_DIR` 必须换掉。仓库挂在 `/mnt/` 下时，WSL 与 Windows 看到的是
+同一个 `target/`，而两边的产物路径完全重叠（都是 `target/debug/`）。共用的结果是
+每次切换平台都全量重编，还会把对方刚编好的东西覆盖掉。
 
 ## Portable：所有运行期文件都在程序目录
 
@@ -78,11 +118,11 @@ connector 与插件通过 `config-schema()` 声明自己需要哪些字段，Web
 
 ## 接进 Claude Code 与 Codex
 
-`install.ps1 -Register` 已经做了，等价于：
+安装脚本的 `-Register` / `--register` 已经做了，等价于：
 
 ```powershell
-claude mcp add trestle -s user -e TRESTLE_AGENT=claude-code -- <程序目录>	restle-mcp.exe
-codex  mcp add trestle    --env TRESTLE_AGENT=codex        -- <程序目录>	restle-mcp.exe
+claude mcp add trestle -s user -e TRESTLE_AGENT=claude-code -- <程序目录>/trestle-mcp
+codex  mcp add trestle    --env TRESTLE_AGENT=codex        -- <程序目录>/trestle-mcp
 ```
 
 不需要先起 daemon——前端连不上会自己把它拉起来。
