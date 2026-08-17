@@ -210,6 +210,87 @@ async fn two_agents_calling_the_same_tool_do_not_block_each_other() {
 }
 
 #[tokio::test]
+#[ignore = "needs real servers"]
+async fn two_agents_asking_for_cards_at_once_get_disjoint_sets() {
+    // M5 的验收项。上一版**跑不了这条**：host 的 allocate() 先取锁、再在锁里去查
+    // nvidia-smi，而那条路会再取一次同一把锁——tokio 的 Mutex 不可重入，
+    // 第一次真的要卡就永久挂死。没有测试走过那条路，所以没人发现。
+    //
+    // 现在插件查、host 挑，host 那一侧一行 I/O 都没有。
+    let (h, _) = host().await;
+    let t = target();
+
+    let first = serde_json::json!({"target": t, "count": 1, "purpose": "test A"}).to_string();
+    let second = serde_json::json!({"target": t, "count": 1, "purpose": "test B"}).to_string();
+    let (a, b) = tokio::join!(
+        h.call_tool("gpu_acquire", &first),
+        h.call_tool("gpu_acquire", &second)
+    );
+
+    // 卡可能真的不够（别人在跑东西），那是合法结果——但两边都拿到时必须不重叠。
+    let mut claims = Vec::new();
+    let mut devices: Vec<u64> = Vec::new();
+    for r in [a, b] {
+        match r {
+            Ok(raw) => {
+                let v: serde_json::Value = serde_json::from_str(&raw).expect("json");
+                claims.push(v["claim"].as_str().unwrap_or_default().to_string());
+                devices.extend(
+                    v["devices"]
+                        .as_array()
+                        .unwrap_or(&vec![])
+                        .iter()
+                        .filter_map(|d| d.as_u64()),
+                );
+            }
+            Err(e) => {
+                // 拿不到也得说清楚谁占着——「失败」两个字对 agent 没有用。
+                let msg = e.to_string();
+                assert!(msg.contains("free") || msg.contains("Busy"), "{msg}");
+            }
+        }
+    }
+    println!("claims {claims:?}, devices {devices:?}");
+    let mut seen = devices.clone();
+    seen.sort_unstable();
+    seen.dedup();
+    assert_eq!(seen.len(), devices.len(), "两个请求拿到了同一张卡: {devices:?}");
+
+    for c in claims {
+        h.call_tool("gpu_release", &serde_json::json!({"claim": c}).to_string())
+            .await
+            .expect("release");
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs real servers"]
+async fn gpu_status_sees_cards_that_trestle_did_not_hand_out() {
+    // 判据是真实世界，不是我们自己的账本：别人绕过 Trestle 直接 ssh 上去占的卡
+    // 照样是 busy，只是 held_by 为空。
+    let (h, _) = host().await;
+    let raw = h
+        .call_tool(
+            "gpu_status",
+            &serde_json::json!({"target": target()}).to_string(),
+        )
+        .await
+        .expect("gpu_status");
+    let v: serde_json::Value = serde_json::from_str(&raw).expect("json");
+    let gpus = v["gpus"].as_array().expect("gpus");
+    assert!(!gpus.is_empty(), "no cards reported: {raw}");
+    for g in gpus {
+        assert!(g["index"].is_number(), "{g}");
+        assert!(g["busy"].is_boolean(), "{g}");
+        // 没有 claim 的卡，held_by 必须是 null 而不是编出来的东西。
+        if g["claim"].is_null() {
+            assert!(g["held_by"].is_null(), "{g}");
+        }
+    }
+    println!("{} cards, {} free", gpus.len(), v["free_count"]);
+}
+
+#[tokio::test]
 async fn calling_a_tool_that_does_not_exist_says_so() {
     let (h, _) = host().await;
     let err = h.call_tool("job_teleport", "{}").await.unwrap_err();

@@ -1,4 +1,4 @@
-//! 把所有零件装起来：运行时、机队、GPU 分配器、技能插件注册表。
+//! 把所有零件装起来：运行时、机队、资源仲裁者、技能插件注册表。
 //!
 //! daemon、CLI、MCP 前端都用这一个门面，不各自拼装——否则「工具从哪来」
 //! 这件事会在三个地方各有一份答案。
@@ -9,8 +9,8 @@ use std::sync::Arc;
 use trestle_core::config::ConfigStore;
 use trestle_core::{Result, TrestleError};
 
+use crate::arbiter::Arbiter;
 use crate::fleet::Fleet;
-use crate::gpu::GpuArbiter;
 use crate::pool::PoolPolicy;
 use crate::runtime::Runtime;
 use crate::state::{EventSink, NullSink, PluginKv};
@@ -20,7 +20,7 @@ use crate::tools::{LoadedTool, ToolRegistry, parse_descriptors};
 pub struct TrestleHost {
     pub store: Arc<ConfigStore>,
     pub fleet: Arc<Fleet>,
-    pub gpu: Arc<GpuArbiter>,
+    pub arbiter: Arc<Arbiter>,
     pub tools: Arc<ToolRegistry>,
     events: Arc<dyn EventSink>,
     /// 热加载要重跑一遍装配，所以运行时和当初那份选项都得留着。
@@ -62,13 +62,13 @@ impl TrestleHost {
         );
 
         let fleet = Arc::new(Fleet::load(&runtime, Arc::clone(&store), opts.policy).await?);
-        let gpu = Arc::new(GpuArbiter::new(Arc::clone(&fleet)));
+        let arbiter = Arc::new(Arbiter::new());
         let tools = Arc::new(ToolRegistry::default());
 
         let host = Self {
             store: Arc::clone(&store),
             fleet: Arc::clone(&fleet),
-            gpu: Arc::clone(&gpu),
+            arbiter: Arc::clone(&arbiter),
             tools: Arc::clone(&tools),
             events: Arc::clone(&opts.events),
             runtime: Arc::clone(&runtime),
@@ -108,7 +108,7 @@ impl TrestleHost {
         let store = &self.store;
         let runtime = &self.runtime;
         let fleet = &self.fleet;
-        let gpu = &self.gpu;
+        let arbiter = &self.arbiter;
         let tools = &self.tools;
 
         for dir in tool_dirs(store) {
@@ -130,7 +130,7 @@ impl TrestleHost {
 
             // 池随时可能自己再长一个实例出来，所以造 state 这件事得留成一个
             // 能反复调的闭包——而且只能捕获 Arc，不能借 `self`。
-            let (fleet, gpu, tools_ref) = (Arc::clone(fleet), Arc::clone(gpu), Arc::clone(tools));
+            let (fleet, arbiter, tools_ref) = (Arc::clone(fleet), Arc::clone(arbiter), Arc::clone(tools));
             let (events, tasks, ws) = (
                 Arc::clone(&self.events),
                 Arc::clone(&self.opts_tasks),
@@ -141,7 +141,7 @@ impl TrestleHost {
                 ToolState::new(
                     for_state.clone(),
                     Arc::clone(&fleet),
-                    Arc::clone(&gpu),
+                    Arc::clone(&arbiter),
                     Arc::clone(&kv),
                     Arc::clone(&events),
                     Arc::clone(&tasks),

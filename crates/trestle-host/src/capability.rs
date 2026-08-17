@@ -50,9 +50,13 @@ pub struct Capabilities {
     /// 允许注册周期任务。
     #[serde(default)]
     pub tasks: bool,
-    /// 允许向 GPU 分配器要卡。
+    /// 允许仲裁哪些**资源种类**（`gpu`、`license`…）。空 = 一个都不许。
+    ///
+    /// 写成清单而不是一个 bool：仲裁者管的是「谁在用什么」，一个能仲裁的插件
+    /// 若能顺手把别的资源的占用还掉，那互斥就是纸糊的。池名形如 `gpu-4/gpu`，
+    /// 比对的是斜杠后面那半——在哪台机器上不由 capability 管，那是 target 的事。
     #[serde(default)]
-    pub gpu: bool,
+    pub arbitrate: Vec<String>,
     /// 允许开端口转发。
     #[serde(default)]
     pub forward: bool,
@@ -92,6 +96,12 @@ impl Capabilities {
 
     pub fn allows_calling(&self, plugin: &str) -> bool {
         self.call_plugins.iter().any(|p| p == plugin)
+    }
+
+    /// 能不能仲裁这个池。`pool` 形如 `gpu-4/gpu`，比的是资源种类那一半。
+    pub fn allows_arbitrating(&self, pool: &str) -> bool {
+        let kind = crate::arbiter::pool_kind(pool);
+        self.arbitrate.iter().any(|k| k == kind)
     }
 }
 

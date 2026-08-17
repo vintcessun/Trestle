@@ -22,7 +22,7 @@ mod bindings {
 }
 
 use bindings::trestle::plugin::base;
-use bindings::trestle::plugin::gpu;
+use bindings::trestle::plugin::plugins;
 use bindings::trestle::plugin::host_services as host;
 use bindings::trestle::plugin::types::{Error, ErrorKind};
 use bindings::Guest;
@@ -43,6 +43,10 @@ struct Job {
     started_ms: u64,
     #[serde(default)]
     gpus: Vec<u32>,
+    /// 向 gpu 插件要卡拿到的凭证。任务结束时凭它还卡——
+    /// 这就是「释放绑在 job 生命周期上」的落地方式。
+    #[serde(default)]
+    gpu_claim: String,
 }
 
 fn err(kind: ErrorKind, detail: impl Into<String>, remedy: impl Into<String>) -> Error {
@@ -267,22 +271,31 @@ fn job_start(v: &serde_json::Value) -> Result<String, Error> {
     let command = json(v, "command").ok_or_else(|| bad_args("job_start needs a `command`"))?;
     let name = json(v, "name").unwrap_or_else(|| "job".into());
 
-    // GPU：向 host 的单点分配器要卡，而不是自己去抢。
-    // 两个 agent 同时要卡时，分配器天然把他们排成序。
-    let mut gpus = Vec::new();
+    // GPU：向 `gpu` 插件要卡，而不是自己去抢。
+    //
+    // 我不知道 nvidia-smi 长什么样，也不该知道——那是 gpu 插件的事；
+    // 而互斥在更下面一层，host 的仲裁者里。两个 agent 同时要卡会被排成序。
+    let mut claim = String::new();
+    let mut gpus: Vec<u32> = Vec::new();
     let mut env: Vec<(String, String)> = Vec::new();
     if let Some(spec) = json(v, "gpus") {
         if let Some(n) = spec
             .strip_prefix("auto:")
             .and_then(|n| n.parse::<u32>().ok())
         {
-            gpus = gpu::allocate(&target, n, &format!("job {name}"))?;
+            let want = serde_json::json!({
+                "target": target, "count": n, "purpose": format!("job {name}")
+            });
+            let got = plugins::call("gpu", "gpu_acquire", &want.to_string())?;
+            let got: serde_json::Value = serde_json::from_str(&got).unwrap_or_default();
+            claim = got["claim"].as_str().unwrap_or_default().to_string();
+            gpus = got["devices"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|d| d.as_u64()).map(|d| d as u32).collect())
+                .unwrap_or_default();
             env.push((
                 "CUDA_VISIBLE_DEVICES".into(),
-                gpus.iter()
-                    .map(u32::to_string)
-                    .collect::<Vec<_>>()
-                    .join(","),
+                got["cuda_visible_devices"].as_str().unwrap_or_default().to_string(),
             ));
         } else if !spec.is_empty() {
             env.push(("CUDA_VISIBLE_DEVICES".into(), spec));
@@ -307,9 +320,13 @@ fn job_start(v: &serde_json::Value) -> Result<String, Error> {
     let out = match base::call(&target, "shell", &payload.to_string()) {
         Ok(out) => out,
         Err(e) => {
-            // 起不来就把卡还回去，别让预留悬着。
-            if !gpus.is_empty() {
-                gpu::release(&target, &gpus);
+            // 起不来就把卡还回去，别让占用悬着。
+            if !claim.is_empty() {
+                let _ = plugins::call(
+                    "gpu",
+                    "gpu_release",
+                    &serde_json::json!({"claim": claim}).to_string(),
+                );
             }
             return Err(e);
         }
@@ -334,6 +351,7 @@ fn job_start(v: &serde_json::Value) -> Result<String, Error> {
         rc_path: d["rc_path"].as_str().unwrap_or_default().to_string(),
         started_ms: host::now_ms(),
         gpus: gpus.clone(),
+        gpu_claim: claim.clone(),
     };
     host::state_set(
         &job_key(&target, &job.job_id),
@@ -385,8 +403,9 @@ fn job_list(v: &serde_json::Value) -> Result<String, Error> {
             _ => {}
         }
         // 任务结束了就把卡还回去——释放绑定在 job 生命周期上，不绑在时间上。
-        if !running && !job.gpus.is_empty() {
-            gpu::release(&job.target, &job.gpus);
+        // job_list 是最常被调用的路径，所以顺手在这里收尸最省事。
+        if !running {
+            release_gpus(&job);
         }
         rows.push(serde_json::json!({
             "job_id": job.job_id,
@@ -493,8 +512,8 @@ fn job_wait(v: &serde_json::Value) -> Result<String, Error> {
     let verdict = r["stdout"].as_str().unwrap_or("").trim().to_string();
 
     let rc = exit_code(&job);
-    if rc.is_some() && !job.gpus.is_empty() {
-        gpu::release(&target, &job.gpus);
+    if rc.is_some() {
+        release_gpus(&job);
     }
 
     Ok(serde_json::to_string(&serde_json::json!({
@@ -506,6 +525,21 @@ fn job_wait(v: &serde_json::Value) -> Result<String, Error> {
         "note": if rc.is_none() { "the job is still running; it was not stopped" } else { "" },
     }))
     .unwrap_or_default())
+}
+
+/// 把这个任务占着的卡还回去。
+///
+/// 幂等：已经还过的 claim 再还一次也没事。任务结束与被停掉是两条路径，
+/// 两边都要还——漏一条就是一张卡永远回不了池。
+fn release_gpus(job: &Job) {
+    if job.gpu_claim.is_empty() {
+        return;
+    }
+    let _ = plugins::call(
+        "gpu",
+        "gpu_release",
+        &serde_json::json!({"claim": job.gpu_claim}).to_string(),
+    );
 }
 
 fn job_stop(v: &serde_json::Value) -> Result<String, Error> {
@@ -533,9 +567,7 @@ fn job_stop(v: &serde_json::Value) -> Result<String, Error> {
         &serde_json::json!({"command": script, "timeout_secs": 30}).to_string(),
     )?;
 
-    if !job.gpus.is_empty() {
-        gpu::release(&target, &job.gpus);
-    }
+    release_gpus(&job);
     host::emit(
         "info",
         "job_finished",

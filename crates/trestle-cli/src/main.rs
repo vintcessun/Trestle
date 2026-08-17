@@ -418,8 +418,8 @@ async fn run(cli: Cli) -> anyhow::Result<std::process::ExitCode> {
                 );
                 let caps = &p["capabilities"];
                 let mut granted = Vec::new();
-                if caps["gpu"] == true {
-                    granted.push("gpu".to_string());
+                for kind in caps["arbitrate"].as_array().cloned().unwrap_or_default() {
+                    granted.push(format!("arbitrate:{}", kind.as_str().unwrap_or("")));
                 }
                 if caps["tasks"] == true {
                     granted.push("tasks".to_string());

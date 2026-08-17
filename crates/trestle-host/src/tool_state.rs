@@ -9,10 +9,10 @@ use std::sync::Arc;
 use trestle_core::{Result, TrestleError};
 
 use crate::bindings::trestle::plugin::types::{Error, ErrorKind, TargetInfo};
-use crate::bindings_tool::trestle::plugin::{base, gpu, plugins, tasks, ws};
+use crate::bindings_tool::trestle::plugin::{arbiter, base, plugins, tasks, ws};
 use crate::capability::{Capabilities, Manifest};
 use crate::fleet::Fleet;
-use crate::gpu::GpuArbiter;
+use crate::arbiter::Arbiter;
 use crate::state::{EventSink, PluginKv, sandboxed_wasi};
 
 /// 周期任务的登记处。真正的定时器在 daemon 里，这里只记「谁要什么时候被叫醒」。
@@ -53,7 +53,7 @@ pub struct ToolState {
     pub plugin: String,
     pub manifest: Manifest,
     pub fleet: Arc<Fleet>,
-    pub gpu: Arc<GpuArbiter>,
+    pub arbiter: Arc<Arbiter>,
     pub kv: Arc<PluginKv>,
     pub events: Arc<dyn EventSink>,
     pub tasks: Arc<dyn TaskSink>,
@@ -79,7 +79,7 @@ impl ToolState {
     pub fn new(
         manifest: Manifest,
         fleet: Arc<Fleet>,
-        gpu: Arc<GpuArbiter>,
+        arbiter: Arc<Arbiter>,
         kv: Arc<PluginKv>,
         events: Arc<dyn EventSink>,
         tasks: Arc<dyn TaskSink>,
@@ -91,7 +91,7 @@ impl ToolState {
             plugin: manifest.name.clone(),
             manifest,
             fleet,
-            gpu,
+            arbiter,
             kv,
             events,
             tasks,
@@ -185,30 +185,49 @@ impl tasks::Host for ToolState {
     }
 }
 
-impl gpu::Host for ToolState {
-    async fn allocate(
+impl arbiter::Host for ToolState {
+    /// 挑几个单位出来。
+    ///
+    /// 快照由插件递进来，host 这一侧**不做任何 I/O**——见 [`crate::arbiter`]
+    /// 顶上那段关于死锁的话。
+    async fn acquire(
         &mut self,
-        target: String,
-        count: u32,
+        pool: String,
+        units: String,
+        want: u32,
         purpose: String,
-    ) -> Result<Vec<u32>, Error> {
-        if !self.caps().gpu {
-            return Err(self.deny("allocate GPUs"));
+    ) -> Result<String, Error> {
+        if !self.caps().allows_arbitrating(&pool) {
+            return Err(self.deny(&format!("arbitrate {}", crate::arbiter::pool_kind(&pool))));
         }
-        let now = now_ms();
-        self.gpu
-            .allocate(&target, count, &purpose, &self.plugin, now)
+        let snapshot: Vec<crate::arbiter::Unit> =
+            serde_json::from_str(&units).map_err(|e| Error {
+                kind: ErrorKind::InvalidRequest,
+                detail: format!("the units snapshot is not a valid unit array: {e}"),
+                remedy: r#"pass [{"id":"0","busy":false,"label":"..."}]"#.into(),
+            })?;
+        let claim = self
+            .arbiter
+            .acquire(&pool, &snapshot, want, &purpose, &self.plugin, now_ms())
             .await
-            .map_err(to_wit)
+            .map_err(to_wit)?;
+        Ok(serde_json::json!({ "claim": claim.id, "units": claim.units }).to_string())
     }
 
-    async fn release(&mut self, target: String, devices: Vec<u32>) {
-        self.gpu.release(&target, &devices).await;
+    async fn release(&mut self, claim: String) {
+        self.arbiter.release(&claim).await;
     }
 
-    async fn view(&mut self, target: String) -> Result<String, Error> {
-        let devices = self.gpu.view(&target).await.map_err(to_wit)?;
-        Ok(serde_json::to_string(&devices).unwrap_or_default())
+    async fn bind_job(&mut self, claim: String, job_id: String) {
+        self.arbiter.bind_job(&claim, &job_id).await;
+    }
+
+    async fn release_job(&mut self, job_id: String) {
+        self.arbiter.release_job(&job_id).await;
+    }
+
+    async fn claims(&mut self, pool: String) -> String {
+        serde_json::to_string(&self.arbiter.claims_of(&pool).await).unwrap_or_else(|_| "[]".into())
     }
 }
 

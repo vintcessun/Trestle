@@ -16,7 +16,6 @@ mod bindings {
 }
 
 use bindings::trestle::plugin::base;
-use bindings::trestle::plugin::gpu;
 use bindings::trestle::plugin::host_services as host;
 use bindings::trestle::plugin::types::{Error, ErrorKind};
 use bindings::Guest;
@@ -88,25 +87,6 @@ impl Guest for Component {
                         "targets": {"type": "array", "items": {"type": "string"}},
                         "timeout_secs": {"type": "integer"}
                     }
-                }
-            },
-            {
-                "name": "gpu_find",
-                "description": "跨机找空闲卡：哪台机器上有几张卡是空的。",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "targets": {"type": "array", "items": {"type": "string"}},
-                        "need": {"type": "integer", "description": "至少要几张连着的空卡"}
-                    }
-                }
-            },
-            {
-                "name": "gpu_status",
-                "description": "一台机器上每张卡的真实占用。别人绕过 Trestle 占的卡也看得见。",
-                "input_schema": {
-                    "type": "object", "required": ["target"],
-                    "properties": {"target": {"type": "string"}}
                 }
             }
         ])
@@ -191,77 +171,21 @@ impl Guest for Component {
                 Ok(serde_json::to_string(&rows).unwrap_or_default())
             }
 
-            "gpu_find" => {
-                let need = v.get("need").and_then(|n| n.as_u64()).unwrap_or(1) as usize;
-                let targets = resolve_names(&selected(&v));
-                let mut rows = Vec::new();
-                for name in targets {
-                    // 走分配器的视图：它的判据是真实显存占用，不是我们自己的账本。
-                    let Ok(raw) = gpu::view(&name) else { continue };
-                    let devices: Vec<serde_json::Value> =
-                        serde_json::from_str(&raw).unwrap_or_default();
-                    let free: Vec<u64> = devices
-                        .iter()
-                        .filter(|d| d["processes"].as_u64().unwrap_or(1) == 0)
-                        .filter_map(|d| d["index"].as_u64())
-                        .collect();
-                    rows.push(serde_json::json!({
-                        "target": name,
-                        "free": free,
-                        "free_count": free.len(),
-                        "enough": free.len() >= need,
-                        "total": devices.len(),
-                    }));
-                }
-                // 空卡多的排前面，agent 一眼就知道该去哪台。
-                rows.sort_by_key(|r| std::cmp::Reverse(r["free_count"].as_u64().unwrap_or(0)));
-                Ok(serde_json::to_string(&rows).unwrap_or_default())
-            }
-
-            "gpu_status" => {
-                let target = v.get("target").and_then(|t| t.as_str()).ok_or_else(|| {
-                    bad("gpu_status needs a `target`; there is no default machine")
-                })?;
-                gpu::view(target)
-            }
-
             other => Err(err(
                 ErrorKind::NotFound,
                 format!("unknown tool '{other}'"),
-                "targets_list, fleet_status, fleet_run, gpu_find, gpu_status",
+                "targets_list, fleet_status, fleet_run（显卡看 gpu_status / gpu_find）",
             )),
         }
     }
 
     fn on_tick(_name: String, _payload: String) {}
 
-    /// Web UI 上的显卡面板。
+    /// 这个插件不带面板。
+    ///
+    /// 显卡那块搬去 `gpu` 插件了：一份要仲裁的资源，它的界面就该跟着它走。
     fn ui_panel() -> String {
-        r#"<div class="group">
-  <h2>显卡</h2>
-  <div id="gpu-rows"><p class="empty">读取中…</p></div>
-</div>
-<script>
-(function () {
-  const box = document.getElementById("gpu-rows");
-  async function refresh() {
-    try {
-      const rows = await (await fetch("/api/tool/gpu_find", {
-        method: "POST", headers: {"content-type": "application/json"}, body: '{"need":1}'
-      })).json();
-      if (!Array.isArray(rows) || !rows.length) { box.innerHTML = '<p class="empty">没有显卡信息</p>'; return; }
-      box.innerHTML = rows.map(r => `
-        <div class="card"><div class="row">
-          <span class="name">${r.target}</span>
-          <span class="pill">${r.free_count} / ${r.total} 空闲</span>
-          <span class="addr">${r.free.join(", ") || "全部占用"}</span>
-        </div></div>`).join("");
-    } catch (e) { box.innerHTML = '<p class="empty">拿不到显卡信息</p>'; }
-  }
-  refresh(); setInterval(refresh, 10000);
-})();
-</script>"#
-            .to_string()
+        String::new()
     }
 
     fn config_schema() -> String {

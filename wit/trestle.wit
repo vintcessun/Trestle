@@ -193,13 +193,43 @@ interface tasks {
 ///
 /// 分配器看到的是 `nvidia-smi` 的**真实占用**加上自己刚分配还没起来的预留，
 /// 所以别人绕过 Trestle 直接 ssh 上去占的卡也照样可见。
-interface gpu {
+/// 通用的资源仲裁：**同一份资源谁在用，由同一个点说了算**。
+///
+/// 这里没有一个字是关于 GPU 的。GPU 只是第一个用它的资源，由 `gpu` 插件实现；
+/// 下一个是许可证席位、独占的盘、还是某台机器上的某个端口，host 都不需要知道。
+///
+/// host 这一侧只做三件事，全在一把锁里：**挑、记账、还账**。
+/// 它**绝不查真实世界**——那是声明这个资源的插件的事，插件把刚查到的快照
+/// 连同申请一起递进来。这条边界不是洁癖：上一版的 host 在锁里回头去查
+/// `nvidia-smi`，而那条路会再取一次同一把锁，于是第一次真的要卡就死锁。
+///
+/// 互斥仍然成立：外面的世界什么时候变不归我们管（别人随时可以直接 ssh 上去占卡），
+/// 但**我们自己发出去的占用**是在一把锁里挑的，两个 agent 同时要卡拿不到同一份。
+interface arbiter {
     use types.{error};
-    /// 要 n 张卡。拿不到时错误里说清楚谁占着、干什么。
-    allocate: func(target: string, count: u32, purpose: string) -> result<list<u32>, error>;
-    release: func(target: string, devices: list<u32>);
-    /// 当前占用视图（JSON）。
-    view: func(target: string) -> result<string, error>;
+
+    /// 申请 `want` 个单位。
+    ///
+    /// `pool` 形如 `gpu-4/gpu`：`<在哪>/<什么资源>`。
+    /// `units` 是调用方**刚刚查到的真实世界**，JSON 数组：
+    /// `[{"id":"0","busy":false,"label":"GPU, 512 MiB used"}, ...]`
+    /// `busy` 是「外面有人在用」，`label` 会原样出现在拿不到时的错误里。
+    ///
+    /// 返回 JSON：`{"claim":"c7","units":["0","1"]}`
+    acquire: func(pool: string, units: string, want: u32, purpose: string) -> result<string, error>;
+
+    /// 还回去。
+    release: func(claim: string);
+
+    /// 把一次占用绑到某个 job 上——job 没了，单位自动回池。
+    /// 这才是正确的过期方式：任务活多久就占多久，而不是猜一个 TTL。
+    bind-job: func(claim: string, job-id: string);
+
+    /// 某个 job 的全部占用一次还清。
+    release-job: func(job-id: string);
+
+    /// 这个池现在有哪些占用（JSON）。
+    claims: func(pool: string) -> string;
 }
 
 /// 开一个 WebSocket 端点。monitor 插件靠它把 URL 交给 Claude Code。
@@ -246,7 +276,7 @@ world tool-plugin {
     import host-services;
     import plugins;
     import tasks;
-    import gpu;
+    import arbiter;
     import ws;
 
     use types.{error};

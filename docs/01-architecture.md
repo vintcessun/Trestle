@@ -54,7 +54,7 @@
 前端的话，每开一个会话就要把全部连接重建一遍（gpu-1 经 VPN 实测 2.4 秒）。有了 daemon：
 
 * 连接**真正**只建一次，跨会话、跨 CLI 复用；
-* Monitor 的 ws、后台任务、插件实例、GPU 分配都有唯一归属；
+* Monitor 的 ws、后台任务、插件实例、资源仲裁都有唯一归属；
 * 一个 agent 能看见别的 agent 在干什么。
 
 **lazy 启动**：任一客户端连不上就自己 spawn 它，用户永远不需要手动 `trestled start`。
@@ -129,7 +129,8 @@ trestle-mcp ──IPC──► trestled
                         │ ToolRegistry: job_start → job.wasm
                         ▼
                     job.wasm
-                        │ gpu.allocate("gpu-4", 2)   ← host 单点仲裁，排队而不是抢锁
+                        │ plugins.call(gpu, gpu_acquire, {gpu-4, 2})
+                        │    └─ gpu.wasm 查 nvidia-smi → arbiter.acquire ← host 在一把锁里挑
                         │ base.call("gpu-4", "shell", {detach:true, env:{CUDA_VISIBLE_DEVICES}})
                         ▼
                     Router: gpu-4 → gpu-cluster（驱动 ssh-socks5.wasm）

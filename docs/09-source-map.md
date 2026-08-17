@@ -19,7 +19,7 @@
 
 | 文件 | 行 | 作用 |
 |---|---|---|
-| ❗ `wit/trestle.wit` | 271 | **插件接口的唯一真相。** 两个世界（`connector` / `tool-plugin`），共用 `types` 与 `host-services`。host 侧用 `bindgen!` 生成，插件侧用 `wit_bindgen::generate!` 生成，两边指的是同一个文件——所以这份 WIT 一改，两边一起动。骨架：`types`（error / error-kind / target-info / health）· `transport`（只给 connector 的传输工具箱）· `host-services`（两边都有）· `base` / `plugins` / `tasks` / `gpu` / `ws`（只给技能插件）。 |
+| ❗ `wit/trestle.wit` | 271 | **插件接口的唯一真相。** 两个世界（`connector` / `tool-plugin`），共用 `types` 与 `host-services`。host 侧用 `bindgen!` 生成，插件侧用 `wit_bindgen::generate!` 生成，两边指的是同一个文件——所以这份 WIT 一改，两边一起动。骨架：`types`（error / error-kind / target-info / health）· `transport`（只给 connector 的传输工具箱）· `host-services`（两边都有）· `base` / `plugins` / `tasks` / `arbiter` / `ws`（只给技能插件）。 |
 | 🔸❗ `config/trestle.toml` | 161 | **统一配置。** 分节 `[daemon]` `[defaults]` `[connectors.<实例名>]` `[targets.<机器名>]`。本轮多了 `pool_max` / `pool_idle_secs`（池的伸缩）、`plugin = "ssh-socks5"`（驱动与实例分家）、`allow_exec`（本机命令授权）、`[connectors.*.ready]`（前置条件）。**不含任何凭据**，可以安全入库。 |
 | ⚙️ `config/secrets.example.toml` | — | 凭据的形状示例。真的那份 `secrets.toml` 已 gitignore，每次提交前都核对过它不在。 |
 
@@ -70,9 +70,9 @@ wasm 沙箱里跑不了的那部分（russh 建在 tokio 上，tokio 的 net 在
 | ❗🔸 `runtime.rs` | 520 | wasmtime 装配。`Runtime`（Engine + 编译缓存，缓存省掉 daemon 每次启动重编 18 MB 的 Python 组件）· `load_connector` / `load_tool`（只编译）· 🔸 `connector_pool` / `tool_pool`（造工厂闭包交给 `InstancePool`）· `ConnectorInstance` / `ToolInstance`（每个方法 `lock().await` 后调 wasm）· `from_wit`（❗ 把插件错误翻回内部错误并**保住 kind**，尤其是 `unknown-state`）。🔸 `ConnectorPool` / `ToolPool` 现在是 `InstancePool<T>` 的别名。 |
 | 🔸 `state.rs` | 203 | connector 实例的 host 侧状态。`PluginKv`（per-实例持久化 KV，原子写）· `SharedConnector`（🔸 池里实例共享的句柄表与 session 表）· `PluginState`（🔸 `plugin` 字段现在是**实例名**，事件与拒绝消息都用它）· `sandboxed_wasi`（❗ 空 WASI 上下文：没有目录、没有网络、没有环境变量）。 |
 | ❗ `imports.rs` | 529 | **传输工具箱的 host 实现**，也是 capability 强制发生的地方。`transport::Host for PluginState` 的每个方法开头都是一次权限检查，被拒就发 `plugin_call_denied` 事件。❗ `local_exec` 是最要紧的一道闸。 |
-| ❗ `tool_state.rs` | 316 | 技能插件的 host 侧状态与导入实现。`base`（七个操作 + `call_many` 扇出）· `plugins`（插件调插件，查 manifest）· `tasks` · `gpu` · `ws` · `host-services`。❗ 技能插件**够不到** transport——`secret_get` 对它直接拒绝，测试钉着这条。 |
+| ❗ `tool_state.rs` | 316 | 技能插件的 host 侧状态与导入实现。`base`（七个操作 + `call_many` 扇出）· `plugins`（插件调插件，查 manifest）· `tasks` · `arbiter` · `ws` · `host-services`。❗ 技能插件**够不到** transport——`secret_get` 对它直接拒绝，测试钉着这条。 |
 | 🔸 `fleet.rs` | 182 | target → connector 路由。`Fleet::load`（🔸 按配置节实例化驱动，把 `allow_exec` 并进 manifest）· `op`（查表转发）· `op_many`（`join_all` 并发扇出）· 🔸 `sweep_pools`。 |
-| ❗ `gpu.rs` | 278 | **单点 GPU 仲裁**，取代了原来的协作式租约。占用视图 = `nvidia-smi` 真实占用 + 自己的预留，所以别人绕过 Trestle 直接 ssh 占卡也看得见。释放绑 job 生命周期，不绑时间。 |
+| ❗🔸 `arbiter.rs` | 330 | **通用的单点资源仲裁**，取代了原来的协作式租约，本轮又从「GPU 分配器」抽成了与资源无关的。`acquire` **不做任何 I/O**：快照由插件查好递进来，host 只在一把锁里挑、记账。这条规矩是上一版的墓志铭——它先取锁再在锁里查 nvidia-smi，而那条路会再取一次同一把锁，第一次真的要卡就永久挂死。9 条单测（两路并发拿到不重叠的单位 / 收尸 / 错误里说得出谁占着）。 |
 | ⚙️ `handles.rs` | 126 | u64 句柄 ↔ 真实对象。wasm 拿不到 Rust 指针，所以要这层。 |
 | 🔸 `host.rs` | 351 | 门面。`TrestleHost::start` / `reload_tools` / `load_tools`（🔸 `make_state` 变成可反复调的 `Arc<dyn Fn>`，因为池随时会再长一个实例）· 🔸 `sweep_pools` · `base_tool_descriptors`（❗ 七个基本操作的对外声明，底部三条测试守着「每个单机工具都 required target」）。 |
 | `tools.rs` | 222 | `ToolRegistry`：工具名 → 插件的全局唯一索引。`parse_descriptors` 在注册时就拒掉**带点的工具名**（Claude Code 会把 `.` 正规化成 `_`，于是声明的名字和 permission matcher 看到的对不上）。 |
@@ -131,7 +131,8 @@ MCP server 由 Claude Code 按 stdio 拉起，**每个会话一个进程**；没
 |---|---|---|
 | `plugins/tools/job/src/lib.rs` | 553 | 长任务：start / list / logs / wait / stop。建在 `shell(detach)` 之上，任务表与日志偏移量全在 host KV 里（**wasm 内存里什么都不留**，所以它敢声明 `stateless`）。 |
 | `plugins/tools/fs/src/lib.rs` | 305 | list / find / stat / tree / disk。纯粹是拼命令 + 解析输出。❗ `stat --printf` 而不是 `stat -c`——后者不处理 `\t` 转义，解析会一无所获。 |
-| `plugins/tools/fleet/src/lib.rs` | 335 | 全队视角：status / run 广播 / gpu 挑卡。❗ 用 `base.call_many` 一次把整队全发出去（SIMD 式：插件一次多发，host 调度）。 |
+| 🔸 `plugins/tools/fleet/src/lib.rs` | 280 | 全队视角：targets_list / fleet_status / fleet_run。❗ 用 `base.call_many` 一次把整队全发出去（SIMD 式：插件一次多发，host 调度）。🔸 GPU 那两个工具与面板本轮搬去 `gpu` 插件了。 |
+| 🔸❗ `plugins/tools/gpu/src/lib.rs` | 355 | **本轮新增。GPU 仲裁。** 所有关于显卡的知识都在这：怎么问 nvidia-smi、多少显存算「有人在用」、怎么按空闲卡数排机器。它查真实世界，host 的 `arbiter` 挑——**互斥必须在一个点上，而真实世界只有插件知道怎么问**。 |
 | `plugins/tools/xfer/src/lib.rs` | 218 | 跨机搬运：服务器之间经本地中转、一份文件分发到多台。**只做编排**，分块与校验都在 `base.upload/download` 里。 |
 | `plugins/tools/monitor/src/lib.rs` | 138 | 调 `ws.publish` 拿 URL 交给 Claude Code 的 Monitor。❗ `timeout_secs` 必填；过滤参数叫 `only_target` 而不是 `target`（它是**过滤条件**不是操作对象，改名比放宽「target 必填」这条规则好）。 |
 | `plugins/tools/hello-py/app.py` | — | 验证 Python 也能写插件，走同一份 WIT。代价是组件 18 MB（Rust 插件 150 KB），所以刻意**不**声明 `stateless`。 |

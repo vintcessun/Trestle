@@ -4,9 +4,10 @@
 
 | 插件 | 工具 | 额外权限 |
 |---|---|---|
-| `job` | job_start / job_list / job_logs / job_wait / job_stop | gpu |
+| `job` | job_start / job_list / job_logs / job_wait / job_stop | call_plugins=[gpu] |
 | `fs` | fs_list / fs_find / fs_stat / fs_tree / fs_disk | （无） |
-| `fleet` | targets_list / fleet_status / fleet_run / gpu_find / gpu_status | gpu |
+| `fleet` | targets_list / fleet_status / fleet_run | （无） |
+| `gpu` | gpu_status / gpu_find / gpu_acquire / gpu_release | arbitrate=[gpu] |
 | `xfer` | xfer_between / xfer_distribute | （无） |
 | `monitor` | monitor_open | ws |
 | `hello-py` | hello_py | （无，Python 写的） |
@@ -19,7 +20,7 @@ base.call-many(targets, op, payload)            // host 并发扇出
 host-services.targets() / config-get / state-* / emit / now-ms / sleep-ms / staging-path
 plugins.call(plugin, tool, args)                // 需要 manifest 声明被调方
 tasks.schedule / cancel  + 导出 on-tick         // 需要 tasks 权限
-gpu.allocate / release / view                   // 需要 gpu 权限
+arbiter.acquire / release / bind-job / claims   // 需要 arbitrate 权限
 ws.publish(filter, timeout-secs)                // 需要 ws 权限
 ```
 
@@ -32,16 +33,20 @@ manifest 里声明，host 在每个导入的入口处强制。wasm 组件没有 
 插件唯一能碰到外界的地方——强制因此是真的，不是约定。
 
 ```toml
-name = "job"
+name = "gpu"
 kind = "tool"
 
 [capabilities]
-gpu = true                    # 向 GPU 分配器要卡
+arbitrate = ["gpu"]           # 仲裁哪些**资源种类**
+# stateless = true            # 准起多个实例（见下）
 # tasks = true                # 注册周期任务
 # ws = true                   # 开 WebSocket 端点
-# call_plugins = ["fleet"]    # 调别的插件
-# local_exec = ["docker"]     # 本机命令（只有 connector 该要这个）
+# call_plugins = ["gpu"]      # 调别的插件（job 就是这么要卡的）
+# local_exec = ["docker"]     # 本机命令（只有 connector 该要这个，而且授权在配置里）
 ```
+
+几条都写成**清单**而不是 bool，理由是同一条：一个能仲裁 GPU 的插件不该顺手
+把别人的许可证席位还掉，一个能调 `gpu` 的插件不该顺手去调 `xfer`。
 
 被拒绝的调用会发 `plugin_call_denied` 事件。这条不能省：否则权限模型是个黑盒，
 出问题时没人知道是被挡了还是根本没调。
@@ -134,7 +139,7 @@ stateless = true    # 我不在 wasm 内存里存跨调用的状态
 `thread_local!`），池里的实例会各看各的，而且是**静默**出错——host 没有办法替你验证。
 要跨调用记东西，用 `host.state-*`（per-plugin KV，池里的实例共享同一份）。
 
-现有五个 Rust 插件都开了。`hello-py` 刻意没开：它本身确实无状态，但 componentize-py
+现有六个 Rust 插件都开了。`hello-py` 刻意没开：它本身确实无状态，但 componentize-py
 产出的组件是 18 MB，长起来就是 ×N 内存。
 
 （connector 驱动里那个 `thread_local` 的 ready 缓存是这条规则的一个**有意**的例外：
@@ -185,4 +190,4 @@ componentize-py -d ../../../wit -w tool-plugin componentize app -o hello-py.wasm
 加一个插件，它自己带着自己的那块界面进来——不需要动前端工程，因为根本没有前端工程。
 
 片段里可以用 host 的 `/api/tool/<name>`（POST，body 是参数 JSON）和 `/events`。
-`job` 与 `fleet` 各有一个真面板，可以照抄。
+`job` 与 `gpu` 各有一个真面板，可以照抄。

@@ -1,0 +1,11 @@
+name = "gpu"
+version = "0.1.0"
+kind = "tool"
+description = "GPU 仲裁：谁在用哪张卡，以及谁能拿到下一张"
+
+[capabilities]
+# 能仲裁哪些资源种类。写成清单而不是一个 bool：仲裁者管的是「谁在用什么」，
+# 一个能仲裁的插件若能顺手把别的资源的占用还掉，互斥就是纸糊的。
+arbitrate = ["gpu"]
+# 无状态：每次调用都重新问机器，占用账本在 host 的仲裁者里。
+stateless = true

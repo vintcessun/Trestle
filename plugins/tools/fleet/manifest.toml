@@ -1,11 +1,9 @@
 name = "fleet"
 version = "0.1.0"
 kind = "tool"
-description = "全队视角：状态概览、广播执行、跨机挑卡"
+description = "全队视角：状态概览、广播执行"
 
 [capabilities]
-# 要看 GPU 占用视图。分配本身仍由 host 单点仲裁。
-gpu = true
-# 无状态：每次调用都重新问机器。
+# 不需要任何额外权限：它只是把 base.call-many 的结果拼起来。
+# GPU 相关的东西在 `gpu` 插件里——那是一份要仲裁的资源，不是一个状态读数。
 stateless = true
-

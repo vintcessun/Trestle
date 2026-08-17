@@ -299,7 +299,7 @@ impl Runtime {
         tp::host_services::add_to_linker::<_, HasTool>(&mut linker, |s| s)?;
         tp::plugins::add_to_linker::<_, HasTool>(&mut linker, |s| s)?;
         tp::tasks::add_to_linker::<_, HasTool>(&mut linker, |s| s)?;
-        tp::gpu::add_to_linker::<_, HasTool>(&mut linker, |s| s)?;
+        tp::arbiter::add_to_linker::<_, HasTool>(&mut linker, |s| s)?;
         tp::ws::add_to_linker::<_, HasTool>(&mut linker, |s| s)?;
         wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
 

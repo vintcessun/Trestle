@@ -4,9 +4,9 @@ kind = "tool"
 description = "长任务管理：起、列、读日志、等、停"
 
 # 技能插件天生够不到 SSH / 本机进程 / 网络 —— 它只能走 base。
-# 这里只需要额外声明一件事：向 GPU 分配器要卡。
 [capabilities]
-gpu = true
-# job 的状态（任务表、日志偏移量）全在 host KV 里，wasm 内存里什么都不留。
+# 要卡就去问 `gpu` 插件。job 自己**不**仲裁：它不知道 nvidia-smi 长什么样，
+# 也不该知道。而互斥在更下面一层（host 的仲裁者），两处都不在这。
+call_plugins = ["gpu"]
+# job 的状态（任务表、日志偏移量、卡的凭证）全在 host KV 里，wasm 内存里什么都不留。
 stateless = true
-

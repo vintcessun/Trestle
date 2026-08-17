@@ -7,9 +7,9 @@
 //! 全在插件里。这个边界是整个架构成立的前提：如果 host 开始替插件做决定，
 //! 那插件就只是配置文件了。
 
+pub mod arbiter;
 pub mod capability;
 pub mod fleet;
-pub mod gpu;
 pub mod handles;
 pub mod host;
 pub mod imports;
