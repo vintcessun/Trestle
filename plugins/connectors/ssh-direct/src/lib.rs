@@ -51,10 +51,27 @@ fn default_dial_timeout() -> u32 {
 
 impl Config {
     fn load() -> Self {
-        serde_json::from_str(&host::config_get()).unwrap_or(Config {
-            dial_timeout_ms: default_dial_timeout(),
-            ready: Default::default(),
-        })
+        let raw = host::config_get();
+        match serde_json::from_str(&raw) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                // 见 ssh-socks5 里同一段：静默退回默认值会让配置错误变成一个
+                // 查不出源头的问题。
+                host::emit(
+                    "warn",
+                    "config_parse_failed",
+                    &serde_json::json!({
+                        "detail": e.to_string(),
+                        "remedy": "检查这个 connector 的配置节；正在用默认值继续",
+                    })
+                    .to_string(),
+                );
+                Config {
+                    dial_timeout_ms: default_dial_timeout(),
+                    ready: Default::default(),
+                }
+            }
+        }
     }
 }
 

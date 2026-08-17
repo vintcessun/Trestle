@@ -72,11 +72,29 @@ fn default_dial_timeout() -> u32 {
 
 impl Config {
     fn load() -> Self {
-        serde_json::from_str(&host::config_get()).unwrap_or(Config {
-            socks: default_socks(),
-            dial_timeout_ms: default_dial_timeout(),
-            ready: Default::default(),
-        })
+        let raw = host::config_get();
+        match serde_json::from_str(&raw) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                // 读不进来却**静默**退回默认值，会让「我明明配了 start」变成一个
+                // 查不出源头的问题：探不通时报的错会让你去加一条你已经写了的命令。
+                // 所以这里必须出声。
+                host::emit(
+                    "warn",
+                    "config_parse_failed",
+                    &serde_json::json!({
+                        "detail": e.to_string(),
+                        "remedy": "检查这个 connector 的配置节；正在用默认值继续",
+                    })
+                    .to_string(),
+                );
+                Config {
+                    socks: default_socks(),
+                    dial_timeout_ms: default_dial_timeout(),
+                    ready: Default::default(),
+                }
+            }
+        }
     }
 }
 

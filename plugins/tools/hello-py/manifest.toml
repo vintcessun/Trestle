@@ -4,7 +4,10 @@ kind = "tool"
 description = "验证 Python 也能写 Trestle 插件"
 
 [capabilities]
-# 刻意**不**开 stateless。这个插件本身确实无状态，但 componentize-py 产出的
-# 组件是 18 MB，池化就是 ×N 内存。它是演示用的，不值得。
+# 刻意**不**开 stateless，所以池的上限是 1。
+#
+# 这个插件本身确实无状态，理由是别的：componentize-py 产出的组件是 18 MB，
+# 实例化也慢得多。池是撞上并发才长的，所以长起来的那一下正好落在一次真实调用
+# 上——对这个组件那一下会很难看。它是演示用的，不值得。
 # stateless = true
 
