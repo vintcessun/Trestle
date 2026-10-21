@@ -7,6 +7,7 @@
 //! 就要动 host。回调进插件之后，「等什么、怎么算够」全是插件自己的事。
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
@@ -14,7 +15,7 @@ use tokio::sync::Mutex;
 use trestle_host::host::TrestleHost;
 use trestle_host::tool_state::{TaskSink, WsHub};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ScheduledTask {
     pub plugin: String,
     pub name: String,
@@ -26,6 +27,11 @@ pub struct ScheduledTask {
 #[derive(Default)]
 pub struct TaskScheduler {
     tasks: Mutex<BTreeMap<String, ScheduledTask>>,
+    /// 登记表落盘的位置。`None` = 只在内存里（测试用）。
+    ///
+    /// 必须落盘：插件的周期任务往往守着一件还没办完的事——job 插件靠它在任务
+    /// 结束后把卡还回去。daemon 一重启登记就没了的话，那件事就再也没人办。
+    path: Option<PathBuf>,
 }
 
 fn key(plugin: &str, name: &str) -> String {
@@ -33,8 +39,48 @@ fn key(plugin: &str, name: &str) -> String {
 }
 
 impl TaskScheduler {
+    /// 只在内存里的登记表。
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// 登记表落在 `path`：有就读回来（重启前登记的周期任务接着跑），
+    /// 之后每次登记/取消都写回去。读不进来就从空表开始并出声。
+    pub fn open(path: impl Into<PathBuf>) -> Self {
+        let path = path.into();
+        let mut tasks = BTreeMap::new();
+        if let Ok(raw) = std::fs::read_to_string(&path) {
+            match serde_json::from_str::<BTreeMap<String, ScheduledTask>>(&raw) {
+                Ok(saved) => tasks = saved,
+                Err(e) => {
+                    tracing::warn!(path = %path.display(), %e,
+                        "the scheduled task list is unreadable; starting empty");
+                    let _ = std::fs::rename(&path, path.with_extension("json.corrupt"));
+                }
+            }
+        }
+        Self {
+            tasks: Mutex::new(tasks),
+            path: Some(path),
+        }
+    }
+
+    /// 原子写。只在登记/取消时调用——每次 tick 改的 `next_ms` 不值得写盘，
+    /// 重启后按旧的 `next_ms` 跑，最坏是提前或推迟一个周期。
+    fn persist(&self, tasks: &BTreeMap<String, ScheduledTask>) {
+        let Some(path) = &self.path else { return };
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let tmp = path.with_extension("json.tmp");
+        match serde_json::to_string_pretty(tasks) {
+            Ok(raw) if std::fs::write(&tmp, &raw).is_ok() => {
+                if let Err(e) = std::fs::rename(&tmp, path) {
+                    tracing::warn!(path = %path.display(), %e, "cannot save scheduled tasks");
+                }
+            }
+            _ => tracing::warn!(path = %path.display(), "cannot save scheduled tasks"),
+        }
     }
 
     /// 起定时循环。
@@ -99,6 +145,7 @@ impl TaskSink for TaskScheduler {
         // 用 try_lock 快路径，拿不到就丢给 runtime。
         if let Ok(mut guard) = tasks.try_lock() {
             guard.insert(k, task);
+            self.persist(&guard);
         } else {
             tracing::warn!(plugin, name, "scheduler was busy; the task was dropped");
         }
@@ -106,7 +153,9 @@ impl TaskSink for TaskScheduler {
 
     fn cancel(&self, plugin: &str, name: &str) {
         if let Ok(mut guard) = self.tasks.try_lock() {
-            guard.remove(&key(plugin, name));
+            if guard.remove(&key(plugin, name)).is_some() {
+                self.persist(&guard);
+            }
         }
     }
 }
@@ -162,6 +211,33 @@ mod tests {
             "a re-registration must not create a second timer"
         );
         assert_eq!(tasks[0].interval_ms, 30000);
+    }
+
+    #[tokio::test]
+    async fn registrations_survive_a_restart() {
+        // job 插件的「任务结束就还卡」巡检，daemon 重启后必须还在。
+        let dir = std::env::temp_dir().join(format!("trestle-tasks-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("tasks.json");
+
+        let before = TaskScheduler::open(&path);
+        before.schedule("job", "reap-gpus", 60_000, "");
+        before.schedule("fleet", "grab", 5000, "{}");
+        before.cancel("fleet", "grab");
+        drop(before);
+
+        let after = TaskScheduler::open(&path);
+        let tasks = after.list().await;
+        assert_eq!(tasks.len(), 1, "{tasks:?}");
+        assert_eq!(
+            (tasks[0].plugin.as_str(), tasks[0].name.as_str()),
+            ("job", "reap-gpus")
+        );
+        assert_eq!(tasks[0].interval_ms, 60_000);
+
+        std::fs::write(&path, "garbage").unwrap();
+        assert!(TaskScheduler::open(&path).list().await.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

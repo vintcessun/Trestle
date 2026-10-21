@@ -28,6 +28,7 @@
 //! 是因为从来没有测试真的走过那条路。把 I/O 挪出去之后，这一整类问题不存在了。
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
@@ -66,16 +67,24 @@ pub struct Claim {
     pub at_ms: u64,
 }
 
+type Ledger = BTreeMap<String, Vec<Claim>>;
+
 pub struct Arbiter {
     /// pool → 这个池上的占用。
-    claims: Mutex<BTreeMap<String, Vec<Claim>>>,
+    claims: Mutex<Ledger>,
     next: AtomicU64,
     /// 这个仲裁者的「纪元」，拼进每个 claim 编号里。
     ///
-    /// 占用账本只在内存里，daemon 一重启就清空、编号从头数；但 job 插件把 claim
-    /// 编号存在**持久化**的 KV 里。没有纪元的话，重启前那个任务结束时去还 `c1`，
-    /// 还掉的是重启后别人刚拿到的 `c1`。
+    /// 编号计数器每次启动从头数，而重启前发出去的 claim 会从磁盘读回来、
+    /// job 插件的 KV 里也存着它们。没有纪元的话，重启后新发的 `c1` 会和
+    /// 重启前那个 `c1` 撞号，一个任务结束时还掉的是别人的卡。
     epoch: u64,
+    /// 账本落盘的位置。`None` = 只在内存里（测试用）。
+    ///
+    /// 必须落盘：daemon 重启（升级、崩溃、空闲退出后再被拉起）时，正在跑的任务
+    /// 还占着卡。账本要是跟着清空，那几张卡在任务开始真正用卡之前看起来都是
+    /// 空的，会被原样分给下一个人。
+    path: Option<PathBuf>,
 }
 
 impl Default for Arbiter {
@@ -87,13 +96,57 @@ impl Default for Arbiter {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as u64)
                 .unwrap_or_default(),
+            path: None,
         }
     }
 }
 
 impl Arbiter {
+    /// 只在内存里的仲裁者。
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// 账本落在 `path` 的仲裁者：有就读回来，之后每次变动都写回去。
+    ///
+    /// 读不进来（文件坏了）就从空账本开始并出声，坏文件挪到一边留着查——
+    /// 不能因为一份坏账本让 daemon 起不来。
+    pub fn open(path: impl Into<PathBuf>) -> Self {
+        let path = path.into();
+        let mut claims = Ledger::new();
+        if let Ok(raw) = std::fs::read_to_string(&path) {
+            match serde_json::from_str::<Ledger>(&raw) {
+                Ok(saved) => claims = saved,
+                Err(e) => {
+                    tracing::warn!(path = %path.display(), %e,
+                        "the claim ledger is unreadable; starting empty");
+                    let _ = std::fs::rename(&path, path.with_extension("json.corrupt"));
+                }
+            }
+        }
+        Self {
+            claims: Mutex::new(claims),
+            path: Some(path),
+            ..Self::default()
+        }
+    }
+
+    /// 原子写：先写临时文件再改名，崩在半路也不会留下坏掉的 JSON。
+    /// 在锁里调用，所以写进去的永远是某一刻完整的账本。
+    fn persist(&self, ledger: &Ledger) {
+        let Some(path) = &self.path else { return };
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let tmp = path.with_extension("json.tmp");
+        match serde_json::to_string_pretty(ledger) {
+            Ok(raw) if std::fs::write(&tmp, &raw).is_ok() => {
+                if let Err(e) = std::fs::rename(&tmp, path) {
+                    tracing::warn!(path = %path.display(), %e, "cannot save the claim ledger");
+                }
+            }
+            _ => tracing::warn!(path = %path.display(), "cannot save the claim ledger"),
+        }
     }
 
     /// 挑 `want` 个既没人用、也没被别人预留的单位。
@@ -111,6 +164,25 @@ impl Arbiter {
         now_ms: u64,
     ) -> Result<Claim> {
         let mut all = self.claims.lock().await;
+        let result = self.pick(&mut all, pool, snapshot, want, purpose, agent, now_ms);
+        // 失败也要写：收尸可能已经改过账本。
+        all.retain(|_, v| !v.is_empty());
+        self.persist(&all);
+        result
+    }
+
+    /// `acquire` 在锁里做的事：收尸、挑、记账。只动内存里的账本。
+    #[allow(clippy::too_many_arguments)]
+    fn pick(
+        &self,
+        all: &mut Ledger,
+        pool: &str,
+        snapshot: &[Unit],
+        want: u32,
+        purpose: &str,
+        agent: &str,
+        now_ms: u64,
+    ) -> Result<Claim> {
         let mine = all.entry(pool.to_string()).or_default();
 
         // 收尸：账上记着、真实世界里却全空、而且已经过了宽限期——那次启动多半失败了。
@@ -201,6 +273,7 @@ impl Arbiter {
             claims.retain(|c| c.id != claim_id);
         }
         all.retain(|_, v| !v.is_empty());
+        self.persist(&all);
     }
 
     /// 把一次占用绑到某个 job 上。
@@ -211,6 +284,7 @@ impl Arbiter {
                 c.job_id = Some(job_id.to_string());
             }
         }
+        self.persist(&all);
     }
 
     /// 某个 job 的全部占用一次还清——只还 `allowed(池名)` 为真的那些池里的。
@@ -225,6 +299,7 @@ impl Arbiter {
             }
         }
         all.retain(|_, v| !v.is_empty());
+        self.persist(&all);
     }
 
     /// 一次占用在哪个池里。权限检查要按池的资源种类比对。
@@ -420,6 +495,59 @@ mod tests {
             .unwrap();
         assert_eq!(a.pool_of_claim(&c.id).await.as_deref(), Some("gpu-4/gpu"));
         assert_eq!(a.pool_of_claim("c999").await, None);
+    }
+
+    fn scratch_dir(tag: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("trestle-arbiter-test-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    async fn the_ledger_survives_a_restart() {
+        // daemon 重启时任务还在跑：它的卡必须还是它的。
+        let dir = scratch_dir("restart");
+        let path = dir.join("arbiter.json");
+
+        let snap = units(&[("0", false), ("1", false)]);
+        let before = Arbiter::open(&path);
+        let bound = before
+            .acquire("gpu-4/gpu", &snap, 1, "training run", "agent", 0)
+            .await
+            .unwrap();
+        before.bind_job(&bound.id, "train-1").await;
+        drop(before);
+
+        let after = Arbiter::open(&path);
+        let claims = after.claims_of("gpu-4/gpu").await;
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].job_id.as_deref(), Some("train-1"));
+        // 卡上暂时没活，也不能分给别人。
+        let err = after
+            .acquire("gpu-4/gpu", &snap, 2, "next", "agent", STALE_MS * 100)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("training run"), "{err}");
+
+        // 还掉之后，下一次启动也看得到「已经还了」。
+        after.release_job("train-1", |_| true).await;
+        drop(after);
+        assert!(Arbiter::open(&path).claims_of("gpu-4/gpu").await.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_corrupt_ledger_starts_empty_instead_of_failing() {
+        let dir = scratch_dir("corrupt");
+        let path = dir.join("arbiter.json");
+        std::fs::write(&path, "{ not json").unwrap();
+
+        let a = Arbiter::open(&path);
+        assert!(a.all().await.is_empty());
+        assert!(path.with_extension("json.corrupt").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

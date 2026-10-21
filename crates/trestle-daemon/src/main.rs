@@ -103,7 +103,10 @@ async fn run(cli: Cli) -> trestle_core::Result<()> {
 
     let bus = EventBus::new();
     let registry = Arc::new(AgentRegistry::new(bus.clone()));
-    let scheduler = Arc::new(tasks::TaskScheduler::new());
+    // 周期任务的登记落盘：重启前登记的（比如 job 插件的还卡巡检）重启后接着跑。
+    let scheduler = Arc::new(tasks::TaskScheduler::open(
+        store.state_dir().join("tasks.json"),
+    ));
 
     // 先用一个占位的 ws 开口把 host 起起来，等 HTTP 服务真的绑上端口后再换成真的。
     let ws_state_holder: Arc<tokio::sync::OnceCell<http::HttpState>> = Default::default();

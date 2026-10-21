@@ -62,7 +62,8 @@ impl TrestleHost {
         );
 
         let fleet = Arc::new(Fleet::load(&runtime, Arc::clone(&store), opts.policy).await?);
-        let arbiter = Arc::new(Arbiter::new());
+        // 占用账本落盘：daemon 重启时正在跑的任务还占着卡。
+        let arbiter = Arc::new(Arbiter::open(store.state_dir().join("arbiter.json")));
         let tools = Arc::new(ToolRegistry::default());
 
         let host = Self {
