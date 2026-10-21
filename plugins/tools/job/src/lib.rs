@@ -22,9 +22,9 @@ mod bindings {
 }
 
 use bindings::trestle::plugin::base;
+use bindings::trestle::plugin::host_services as host;
 use bindings::trestle::plugin::plugins;
 use bindings::trestle::plugin::tasks;
-use bindings::trestle::plugin::host_services as host;
 use bindings::trestle::plugin::types::{Error, ErrorKind};
 use bindings::Guest;
 
@@ -294,11 +294,19 @@ fn job_start(v: &serde_json::Value) -> Result<String, Error> {
             claim = got["claim"].as_str().unwrap_or_default().to_string();
             gpus = got["devices"]
                 .as_array()
-                .map(|a| a.iter().filter_map(|d| d.as_u64()).map(|d| d as u32).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|d| d.as_u64())
+                        .map(|d| d as u32)
+                        .collect()
+                })
                 .unwrap_or_default();
             env.push((
                 "CUDA_VISIBLE_DEVICES".into(),
-                got["cuda_visible_devices"].as_str().unwrap_or_default().to_string(),
+                got["cuda_visible_devices"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
             ));
         } else if !spec.is_empty() {
             env.push(("CUDA_VISIBLE_DEVICES".into(), spec));
@@ -599,8 +607,18 @@ fn reap_gpus() {
         .into_iter()
         .filter(|j| !j.gpu_claim.is_empty())
         .collect();
+    let known: Vec<String> = host::targets().into_iter().map(|t| t.name).collect();
     let mut still = 0;
     for job in &holding {
+        // 两种记录不用登机就知道无卡可还，只把凭证划掉：
+        //   * 凭证没有纪元前缀（`c39` 而不是 `c1792…-39`）——发它的仲裁者还不落盘，
+        //     那本账早随着某次重启没了；
+        //   * 任务所在的机器已经不在配置里（按正式名字比，不认别名）——它的状态
+        //     永远查不到，留着只会让巡检每分钟白跑一趟、永远停不下来。
+        if !job.gpu_claim.contains('-') || !known.contains(&job.target) {
+            release_gpus(job);
+            continue;
+        }
         if exit_code(job).is_some() {
             release_gpus(job);
             host::emit(
