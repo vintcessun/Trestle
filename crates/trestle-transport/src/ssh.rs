@@ -100,8 +100,11 @@ impl Handler for ClientHandler {
 
     async fn check_server_key(
         &mut self,
-        server_public_key: &russh::keys::ssh_key::PublicKey,
+        server_key: &russh::keys::PublicKeyOrCertificate,
     ) -> std::result::Result<bool, Self::Error> {
+        // russh 0.63 起服务端可能出示主机证书。TOFU 比对的是证书里的那把公钥——
+        // 和 known_hosts 里记的是同一个东西。
+        let server_public_key = &server_key.public_key();
         let fingerprint = server_public_key
             .fingerprint(Default::default())
             .to_string();
