@@ -6,14 +6,15 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use tokio::net::TcpStream;
+use trestle_transport::dial::Stream;
 use trestle_transport::{AgentClient, Forward, SshSession};
 
 /// 一个插件实例持有的全部 host 侧资源。
 #[derive(Default)]
 pub struct HandleTable {
     next: u64,
-    streams: HashMap<u64, TcpStream>,
+    /// 不只是 TCP：经跳板机开出来的 SSH 通道也是一条流，SSH 层不关心它从哪来。
+    streams: HashMap<u64, Box<dyn Stream>>,
     sessions: HashMap<u64, Arc<SshSession>>,
     agents: HashMap<u64, Arc<AgentClient>>,
     forwards: HashMap<u64, Forward>,
@@ -26,14 +27,14 @@ impl HandleTable {
         self.next
     }
 
-    pub fn put_stream(&mut self, s: TcpStream) -> u64 {
+    pub fn put_stream(&mut self, s: impl Stream) -> u64 {
         let h = self.alloc();
-        self.streams.insert(h, s);
+        self.streams.insert(h, Box::new(s));
         h
     }
 
     /// 取走一条流。SSH 握手会消费掉它，所以这里是 take 而不是 get。
-    pub fn take_stream(&mut self, h: u64) -> Option<TcpStream> {
+    pub fn take_stream(&mut self, h: u64) -> Option<Box<dyn Stream>> {
         self.streams.remove(&h)
     }
 

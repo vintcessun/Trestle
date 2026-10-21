@@ -94,6 +94,14 @@ interface transport {
     /// 在 SSH 会话上跑一条命令并收全部输出（部署期的探测用，不是基本操作里的 shell）。
     ssh-exec: func(session: session-handle, command: string) -> result<exec-output, error>;
 
+    /// 在一条已经建好的 SSH 会话上开 direct-tcpip 通道，连到 `host:port`，
+    /// 交回一条能喂给 `ssh-connect` 的流 —— 也就是跳板机（ProxyJump）。
+    ///
+    /// `host` 是**从跳板机看过去**的地址：同网段的内网 IP 在这里就是可达的，
+    /// 哪怕本机根本连不到它。
+    ssh-tunnel: func(session: session-handle, host: string, port: u16, timeout-ms: u32)
+                -> result<stream-handle, error>;
+
     ssh-alive: func(session: session-handle) -> bool;
     ssh-close: func(session: session-handle);
 

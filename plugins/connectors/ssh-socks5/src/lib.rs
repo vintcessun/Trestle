@@ -24,6 +24,7 @@ mod bindings {
 }
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 
 use bindings::Guest;
 use bindings::trestle::plugin::host_services as host;
@@ -59,6 +60,13 @@ struct Config {
     /// 前置条件。不写 = 代理已经在跑，我只管连。
     #[serde(default)]
     ready: ready::ReadyConfig,
+    /// 跳板机（ProxyJump）：`目标名 -> 跳板机的目标名`。
+    ///
+    /// 有些机器从代理那头也到不了（或 SSH banner 交换会卡住），但从同网段的
+    /// 另一台能连。那就先连上跳板机，再在它的 SSH 会话上开通道过去。
+    /// 跳板机必须也归这个 connector 管——它的连接要能被复用。
+    #[serde(default)]
+    jump: HashMap<String, String>,
 }
 
 fn default_socks() -> String {
@@ -92,6 +100,7 @@ impl Config {
                     socks: default_socks(),
                     dial_timeout_ms: default_dial_timeout(),
                     ready: Default::default(),
+                    jump: Default::default(),
                 }
             }
         }
@@ -248,6 +257,10 @@ impl Guest for Component {
                     "description": "SOCKS5 代理地址。也是 ready 的默认探测目标。"
                 },
                 "dial_timeout_ms": { "type": "integer", "default": default_dial_timeout() },
+                "jump": {
+                    "type": "object", "additionalProperties": {"type": "string"},
+                    "description": "跳板机：目标名 -> 跳板机的目标名（也必须归这个 connector）。先连跳板机，再经它的 SSH 开通道过去。"
+                },
                 "allow_exec": {
                     "type": "array", "items": {"type": "string"},
                     "description": "准这个 connector 在本机跑哪些命令。ready.start 用到什么就写什么。"
@@ -291,6 +304,14 @@ impl Guest for Component {
 /// host 会给这个 connector 起好几个实例，好让「同时打整支机队」真并发；
 /// 如果每个实例各存各的，六个实例就会对同一台机器建六条连接。
 fn connect(target: &str) -> Result<Live, Error> {
+    connect_hop(target, 0)
+}
+
+/// 跳板链最多几层。真实配置里一层就够；这个上限只是为了让配错的环
+/// （a 经 b、b 经 a）报一个看得懂的错，而不是把栈打爆。
+const MAX_JUMP_DEPTH: u32 = 4;
+
+fn connect_hop(target: &str, depth: u32) -> Result<Live, Error> {
     if let Some((session, agent)) = tp::session_lookup(target) {
         if tp::agent_alive(agent) && tp::ssh_alive(session) {
             return Ok(Live { session, agent });
@@ -311,14 +332,29 @@ fn connect(target: &str) -> Result<Live, Error> {
             )
         })?;
 
-    <Component as Guest>::ensure_ready()?;
-
     let cfg = Config::load();
-    let stream = tp::dial_socks5(
-        &cfg.socks,
-        &format!("{}:{}", info.host, info.port),
-        cfg.dial_timeout_ms,
-    )?;
+    let stream = match cfg.jump.get(target) {
+        Some(via) => {
+            if depth >= MAX_JUMP_DEPTH {
+                return Err(err(
+                    ErrorKind::InvalidRequest,
+                    format!("jump chain for '{target}' is deeper than {MAX_JUMP_DEPTH} hops"),
+                    "check this connector's `jump` table for a loop",
+                ));
+            }
+            // 跳板机自己也是一台被管理的机器：它的连接照常复用、照常走代理。
+            let hop = connect_hop(via, depth + 1)?;
+            tp::ssh_tunnel(hop.session, &info.host, info.port, cfg.dial_timeout_ms)?
+        }
+        None => {
+            <Component as Guest>::ensure_ready()?;
+            tp::dial_socks5(
+                &cfg.socks,
+                &format!("{}:{}", info.host, info.port),
+                cfg.dial_timeout_ms,
+            )?
+        }
+    };
     // 凭据用引用而不是明文：密码从不进入 wasm。
     let session = tp::ssh_connect(
         stream,

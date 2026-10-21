@@ -189,6 +189,48 @@ impl transport::Host for PluginState {
             .put_session(Arc::new(session)))
     }
 
+    async fn ssh_tunnel(
+        &mut self,
+        session: u64,
+        host: String,
+        port: u16,
+        timeout_ms: u32,
+    ) -> Result<u64, Error> {
+        // 经跳板机连过去也是在「拨号」，同一道闸。
+        let addr = format!("{host}:{port}");
+        if !self.caps().allows_dial(&addr) {
+            return Err(denied(self, &format!("dial {addr} (via ssh tunnel)")));
+        }
+        let Some(s) = self.shared.handles.lock().await.session(session) else {
+            return Err(gone("session"));
+        };
+        let channel = match tokio::time::timeout(
+            Duration::from_millis(timeout_ms as u64),
+            s.open_direct_tcpip(&host, port),
+        )
+        .await
+        {
+            Ok(Ok(c)) => c,
+            Ok(Err(e)) => return Err(error_to_wit(e)),
+            Err(_) => {
+                return Err(Error {
+                    kind: ErrorKind::Unreachable,
+                    detail: format!(
+                        "the jump host did not open a tunnel to {addr} within {}s",
+                        timeout_ms / 1000
+                    ),
+                    remedy: format!("check that {addr} is reachable from the jump host"),
+                });
+            }
+        };
+        Ok(self
+            .shared
+            .handles
+            .lock()
+            .await
+            .put_stream(channel.into_stream()))
+    }
+
     async fn ssh_exec(&mut self, session: u64, command: String) -> Result<ExecOutput, Error> {
         let Some(s) = self.shared.handles.lock().await.session(session) else {
             return Err(gone("session"));

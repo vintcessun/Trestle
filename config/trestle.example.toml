@@ -81,6 +81,12 @@ timeout_secs = 40
 # 成功之后多久内不再查 docker。没有它每次拨号都要问一遍。
 cache_secs = 30
 
+# 跳板机（ProxyJump）：目标名 -> 跳板机的目标名。跳板机必须也归这个 connector。
+# 从代理/本机到不了、但从同网段另一台能连的机器，就先连跳板机，再经它的 SSH
+# 开通道过去。ssh-socks5 与 ssh-direct 都支持。
+# [connectors.gpu-cluster.jump]
+# gpu-5 = "gpu-1"
+
 # 一组直连就能进去的机器。认证方式由 secrets.toml 里给的是密钥还是密码决定，
 # 不在这里声明——声明一遍而实际由别处决定，只会多一处能说谎的地方。
 [connectors.cloud]

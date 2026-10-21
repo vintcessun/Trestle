@@ -19,6 +19,7 @@ mod bindings {
 }
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 
 use bindings::Guest;
 use bindings::trestle::plugin::host_services as host;
@@ -43,6 +44,9 @@ struct Config {
     /// 前置条件。直连一般不写；要先拨 VPN 之类的就写在这。
     #[serde(default)]
     ready: ready::ReadyConfig,
+    /// 跳板机：`目标名 -> 跳板机的目标名`。见 `ssh-socks5` 里同名的那一项。
+    #[serde(default)]
+    jump: HashMap<String, String>,
 }
 
 fn default_dial_timeout() -> u32 {
@@ -69,6 +73,7 @@ impl Config {
                 Config {
                     dial_timeout_ms: default_dial_timeout(),
                     ready: Default::default(),
+                    jump: Default::default(),
                 }
             }
         }
@@ -207,6 +212,10 @@ impl Guest for Component {
             "type": "object",
             "properties": {
                 "dial_timeout_ms": { "type": "integer", "default": default_dial_timeout() },
+                "jump": {
+                    "type": "object", "additionalProperties": {"type": "string"},
+                    "description": "跳板机：目标名 -> 跳板机的目标名（也必须归这个 connector）。"
+                },
                 "allow_exec": {
                     "type": "array", "items": {"type": "string"},
                     "description": "准这个 connector 在本机跑哪些命令。只有配了 ready.start 才需要。"
@@ -229,6 +238,13 @@ impl Guest for Component {
 }
 
 fn connect(target: &str) -> Result<Live, Error> {
+    connect_hop(target, 0)
+}
+
+/// 见 `ssh-socks5` 里同名的常量：只为让配错的环报一个看得懂的错。
+const MAX_JUMP_DEPTH: u32 = 4;
+
+fn connect_hop(target: &str, depth: u32) -> Result<Live, Error> {
     // 连接记在 host 那边而不是我自己的内存里 —— host 会起多个实例来做并发，
     // 各存各的就会对同一台机器建多条连接。
     if let Some((session, agent)) = tp::session_lookup(target) {
@@ -250,13 +266,24 @@ fn connect(target: &str) -> Result<Live, Error> {
             )
         })?;
 
-    <Component as Guest>::ensure_ready()?;
-
     let cfg = Config::load();
-    let stream = tp::dial(
-        &format!("{}:{}", info.host, info.port),
-        cfg.dial_timeout_ms,
-    )?;
+    let stream = match cfg.jump.get(target) {
+        Some(via) => {
+            if depth >= MAX_JUMP_DEPTH {
+                return Err(err(
+                    ErrorKind::InvalidRequest,
+                    format!("jump chain for '{target}' is deeper than {MAX_JUMP_DEPTH} hops"),
+                    "check this connector's `jump` table for a loop",
+                ));
+            }
+            let hop = connect_hop(via, depth + 1)?;
+            tp::ssh_tunnel(hop.session, &info.host, info.port, cfg.dial_timeout_ms)?
+        }
+        None => {
+            <Component as Guest>::ensure_ready()?;
+            tp::dial(&format!("{}:{}", info.host, info.port), cfg.dial_timeout_ms)?
+        }
+    };
     let session = tp::ssh_connect(
         stream,
         target,
