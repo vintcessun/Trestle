@@ -23,11 +23,11 @@ mod bindings {
     });
 }
 
-use bindings::Guest;
 use bindings::trestle::plugin::arbiter;
 use bindings::trestle::plugin::base;
 use bindings::trestle::plugin::host_services as host;
 use bindings::trestle::plugin::types::{Error, ErrorKind};
+use bindings::Guest;
 
 /// 显存占用超过这个数就认为卡上有活。
 ///
@@ -322,7 +322,9 @@ impl Guest for Component {
                     // 一台没有卡（或者根本连不上）不该让整个查询失败——
                     // 「哪台有空卡」这个问题，答不上来的那台跳过就是了。
                     let Ok(raw) = r else { continue };
-                    let Ok(cards) = parse_cards(name, raw) else { continue };
+                    let Ok(cards) = parse_cards(name, raw) else {
+                        continue;
+                    };
                     let held = held_units(name);
                     let free: Vec<u64> = cards
                         .iter()
@@ -389,10 +391,9 @@ impl Guest for Component {
             }
 
             "gpu_release" => {
-                let claim = v
-                    .get("claim")
-                    .and_then(|c| c.as_str())
-                    .ok_or_else(|| bad("gpu_release needs the `claim` that gpu_acquire returned"))?;
+                let claim = v.get("claim").and_then(|c| c.as_str()).ok_or_else(|| {
+                    bad("gpu_release needs the `claim` that gpu_acquire returned")
+                })?;
                 arbiter::release(claim);
                 Ok(serde_json::json!({"released": claim}).to_string())
             }

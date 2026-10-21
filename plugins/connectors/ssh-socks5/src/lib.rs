@@ -26,10 +26,10 @@ mod bindings {
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use bindings::Guest;
 use bindings::trestle::plugin::host_services as host;
 use bindings::trestle::plugin::transport as tp;
 use bindings::trestle::plugin::types::{Error, ErrorKind, Health, TargetInfo};
+use bindings::Guest;
 use connector_ready as ready;
 
 /// 一台机器的活连接。
@@ -173,8 +173,7 @@ impl Guest for Component {
     fn ensure_ready() -> Result<(), Error> {
         let cfg = Config::load();
         READY.with(|cache| {
-            ready::ensure(&Host, &cfg.ready, &mut cache.borrow_mut(), &cfg.socks)
-                .map_err(not_ready)
+            ready::ensure(&Host, &cfg.ready, &mut cache.borrow_mut(), &cfg.socks).map_err(not_ready)
         })
     }
 
