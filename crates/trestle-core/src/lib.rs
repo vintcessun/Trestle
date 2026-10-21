@@ -15,6 +15,7 @@ pub mod config;
 pub mod error;
 pub mod event;
 pub mod ops;
+pub mod spawn;
 pub mod target;
 
 pub use error::{Result, TrestleError};

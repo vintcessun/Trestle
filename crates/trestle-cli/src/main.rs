@@ -705,6 +705,8 @@ async fn connect_or_spawn(root: &std::path::Path) -> anyhow::Result<IpcClient> {
         // daemon 要活得比这次 CLI 调用长，所以脱离进程组。
         cmd.creation_flags(0x0000_0008 | 0x0000_0200);
     }
+    // 不然 daemon 会攥住 shell 交给我们的管道：`trestle ... | grep` 要等半小时。
+    trestle_core::spawn::keep_std_handles_private();
     cmd.spawn()
         .map_err(|e| anyhow::anyhow!("cannot start {}: {e}", exe.display()))?;
 

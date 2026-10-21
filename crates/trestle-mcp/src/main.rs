@@ -244,6 +244,8 @@ mod trestle_mcp_bootstrap {
             // 这个 MCP 进程一起死——它要活得比任何一个会话都长。
             cmd.creation_flags(0x0000_0008 | 0x0000_0200);
         }
+        // 不然 daemon 会攥住我们和客户端之间的 stdio 管道。
+        trestle_core::spawn::keep_std_handles_private();
         cmd.spawn()
             .map_err(|e| anyhow::anyhow!("cannot start {}: {e}", exe.display()))?;
 
