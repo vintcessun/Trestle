@@ -66,11 +66,29 @@ pub struct Claim {
     pub at_ms: u64,
 }
 
-#[derive(Default)]
 pub struct Arbiter {
     /// pool → 这个池上的占用。
     claims: Mutex<BTreeMap<String, Vec<Claim>>>,
     next: AtomicU64,
+    /// 这个仲裁者的「纪元」，拼进每个 claim 编号里。
+    ///
+    /// 占用账本只在内存里，daemon 一重启就清空、编号从头数；但 job 插件把 claim
+    /// 编号存在**持久化**的 KV 里。没有纪元的话，重启前那个任务结束时去还 `c1`，
+    /// 还掉的是重启后别人刚拿到的 `c1`。
+    epoch: u64,
+}
+
+impl Default for Arbiter {
+    fn default() -> Self {
+        Self {
+            claims: Mutex::default(),
+            next: AtomicU64::default(),
+            epoch: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or_default(),
+        }
+    }
 }
 
 impl Arbiter {
@@ -103,9 +121,13 @@ impl Arbiter {
             .filter(|u| !u.busy)
             .map(|u| u.id.as_str())
             .collect();
+        //
+        // **绑了 job 的不收。** 它的生命周期由 job 管（结束/被停就还），而「卡上暂时
+        // 没活」对一个活着的任务再正常不过——装环境、下数据、tokenize 都可能一跑
+        // 半小时不碰卡。按空闲收它，就是把一个活任务的卡分给下一个人。
         mine.retain(|c| {
             let all_idle = c.units.iter().all(|u| idle.contains(&u.as_str()));
-            !(all_idle && now_ms.saturating_sub(c.at_ms) > STALE_MS)
+            c.job_id.is_some() || !(all_idle && now_ms.saturating_sub(c.at_ms) > STALE_MS)
         });
 
         let taken: Vec<&str> = mine
@@ -152,7 +174,11 @@ impl Arbiter {
         }
 
         let claim = Claim {
-            id: format!("c{}", self.next.fetch_add(1, Ordering::Relaxed) + 1),
+            id: format!(
+                "c{}-{}",
+                self.epoch,
+                self.next.fetch_add(1, Ordering::Relaxed) + 1
+            ),
             pool: pool.to_string(),
             units: free
                 .into_iter()
@@ -187,13 +213,28 @@ impl Arbiter {
         }
     }
 
-    /// 某个 job 的全部占用一次还清。
-    pub async fn release_job(&self, job_id: &str) {
+    /// 某个 job 的全部占用一次还清——只还 `allowed(池名)` 为真的那些池里的。
+    ///
+    /// 过滤条件由调用方给，是因为「谁能还哪种资源」是 capability 的事，
+    /// 不该让一个只能仲裁 gpu 的插件顺手把同一个 job 的别的占用也还掉。
+    pub async fn release_job(&self, job_id: &str, allowed: impl Fn(&str) -> bool) {
         let mut all = self.claims.lock().await;
-        for claims in all.values_mut() {
-            claims.retain(|c| c.job_id.as_deref() != Some(job_id));
+        for (pool, claims) in all.iter_mut() {
+            if allowed(pool) {
+                claims.retain(|c| c.job_id.as_deref() != Some(job_id));
+            }
         }
         all.retain(|_, v| !v.is_empty());
+    }
+
+    /// 一次占用在哪个池里。权限检查要按池的资源种类比对。
+    pub async fn pool_of_claim(&self, claim_id: &str) -> Option<String> {
+        self.claims
+            .lock()
+            .await
+            .iter()
+            .find(|(_, cs)| cs.iter().any(|c| c.id == claim_id))
+            .map(|(pool, _)| pool.clone())
     }
 
     pub async fn claims_of(&self, pool: &str) -> Vec<Claim> {
@@ -329,14 +370,74 @@ mod tests {
             .unwrap();
         a.bind_job(&claim.id, "train-1").await;
 
-        a.release_job("train-2").await;
+        a.release_job("train-2", |_| true).await;
         assert_eq!(
             a.claims_of("gpu-4/gpu").await.len(),
             1,
             "wrong job released"
         );
-        a.release_job("train-1").await;
+        // 不准碰的池不还。
+        a.release_job("train-1", |pool| pool_kind(pool) != "gpu")
+            .await;
+        assert_eq!(a.claims_of("gpu-4/gpu").await.len(), 1);
+        a.release_job("train-1", |_| true).await;
         assert!(a.claims_of("gpu-4/gpu").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_job_bound_claim_is_never_collected_while_idle() {
+        // 任务还在装环境/下数据，卡上没活——那也是它的卡。只有 job 结束才还。
+        let a = Arbiter::new();
+        let snap = units(&[("0", false), ("1", false)]);
+        let bound = a
+            .acquire("gpu-4/gpu", &snap, 1, "job preparing data", "agent", 0)
+            .await
+            .unwrap();
+        a.bind_job(&bound.id, "train-1").await;
+        a.acquire("gpu-4/gpu", &snap, 1, "unbound, start failed", "agent", 0)
+            .await
+            .unwrap();
+
+        let err = a
+            .acquire("gpu-4/gpu", &snap, 2, "next", "agent", STALE_MS * 100)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("job preparing data"), "{err}");
+        // 没绑 job 的那次照样被收掉，所以要一张还是拿得到。
+        let ok = a
+            .acquire("gpu-4/gpu", &snap, 1, "next", "agent", STALE_MS * 100)
+            .await;
+        assert!(ok.is_ok(), "{:?}", ok.err().map(|e| e.to_string()));
+    }
+
+    #[tokio::test]
+    async fn the_pool_of_a_claim_can_be_looked_up() {
+        let a = Arbiter::new();
+        let snap = units(&[("0", false)]);
+        let c = a
+            .acquire("gpu-4/gpu", &snap, 1, "job", "agent", 0)
+            .await
+            .unwrap();
+        assert_eq!(a.pool_of_claim(&c.id).await.as_deref(), Some("gpu-4/gpu"));
+        assert_eq!(a.pool_of_claim("c999").await, None);
+    }
+
+    #[tokio::test]
+    async fn claim_ids_do_not_repeat_across_restarts() {
+        // 重启前存下的 claim 编号，不能撞上重启后发出去的那个。
+        let before = Arbiter::new();
+        let snap = units(&[("0", false)]);
+        let old = before
+            .acquire("gpu-4/gpu", &snap, 1, "job", "agent", 0)
+            .await
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let after = Arbiter::new();
+        let new = after
+            .acquire("gpu-4/gpu", &snap, 1, "job", "agent", 0)
+            .await
+            .unwrap();
+        assert_ne!(old.id, new.id);
     }
 
     #[tokio::test]

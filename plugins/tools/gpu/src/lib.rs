@@ -66,11 +66,21 @@ struct Card {
     name: String,
     total_mib: u64,
     used_mib: u64,
+    /// 显存读不出来（`[Unknown Error]`、`[N/A]`、`[GPU requires reset]`……）时的原文。
+    /// 这样的卡**不能分出去**：把它当成「0 MiB 已用」就是把一张坏卡当空卡发掉。
+    fault: Option<String>,
 }
 
 impl Card {
     fn busy(&self) -> bool {
-        self.used_mib > BUSY_MIB
+        self.fault.is_some() || self.used_mib > BUSY_MIB
+    }
+
+    fn label(&self) -> String {
+        match &self.fault {
+            Some(raw) => format!("{}, memory unreadable: {raw}", self.name),
+            None => format!("{}, {} MiB used", self.name, self.used_mib),
+        }
     }
 }
 
@@ -109,11 +119,27 @@ fn parse_cards(target: &str, raw: &str) -> Result<Vec<Card>, Error> {
         if cols.len() < 4 {
             continue;
         }
+        // 认不出是哪张卡的行只能跳过：退回 0 会和真正的 0 号卡撞号。
+        let Ok(index) = cols[0].parse::<u32>() else {
+            host::emit(
+                "warn",
+                "gpu_unparsable_row",
+                &serde_json::json!({"target": target, "line": line}).to_string(),
+            );
+            continue;
+        };
+        let total = cols[2].parse::<u64>();
+        let used = cols[3].parse::<u64>();
+        let fault = match (&total, &used) {
+            (Ok(_), Ok(_)) => None,
+            _ => Some(format!("total={} used={}", cols[2], cols[3])),
+        };
         cards.push(Card {
-            index: cols[0].parse().unwrap_or(0),
+            index,
             name: cols[1].to_string(),
-            total_mib: cols[2].parse().unwrap_or(0),
-            used_mib: cols[3].parse().unwrap_or(0),
+            total_mib: total.unwrap_or(0),
+            used_mib: used.unwrap_or(0),
+            fault,
         });
     }
     Ok(cards)
@@ -127,7 +153,7 @@ fn snapshot(cards: &[Card]) -> String {
             serde_json::json!({
                 "id": c.index.to_string(),
                 "busy": c.busy(),
-                "label": format!("{}, {} MiB used", c.name, c.used_mib),
+                "label": c.label(),
             })
         })
         .collect();
@@ -170,7 +196,12 @@ fn status_of(target: &str) -> Result<serde_json::Value, Error> {
                 "name": c.name,
                 "memory_total_mb": c.total_mib,
                 "memory_used_mb": c.used_mib,
+                // busy 只说真实世界：卡上有活（或者卡坏了读不出来）。
                 "busy": c.busy(),
+                "fault": c.fault,
+                // 能不能现在要到：真实世界空着，而且不是 Trestle 已经分出去的。
+                // 刚分出去的卡任务可能还没起来，nvidia-smi 里看着是空的。
+                "available": !c.busy() && held.is_none(),
                 // 我们自己分出去的说得出用途；别人占的这里是 null，但 busy 仍是 true。
                 "held_by": held.map(|h| h["purpose"].clone()),
                 "claim": held.map(|h| h["id"].clone()),
@@ -178,7 +209,7 @@ fn status_of(target: &str) -> Result<serde_json::Value, Error> {
         })
         .collect();
 
-    let free = devices.iter().filter(|d| d["busy"] == false).count();
+    let free = devices.iter().filter(|d| d["available"] == true).count();
     Ok(serde_json::json!({
         "target": target,
         "gpus": devices,
@@ -227,6 +258,18 @@ impl Guest for Component {
                         "target": {"type": "string", "description": "机器名。必填——没有默认机。"},
                         "count": {"type": "integer"},
                         "purpose": {"type": "string", "description": "拿来干什么。会出现在别人的「卡不够」错误里。"}
+                    }
+                }
+            },
+            {
+                "name": "gpu_bind",
+                "description": "把一次 gpu_acquire 绑到一个 job 上：job 活着卡就一直归它，job 结束才还。job_start 的 gpus=\"auto:N\" 会自动调用，一般不用手动调。",
+                "input_schema": {
+                    "type": "object",
+                    "required": ["claim", "job_id"],
+                    "properties": {
+                        "claim": {"type": "string"},
+                        "job_id": {"type": "string"}
                     }
                 }
             },
@@ -335,6 +378,16 @@ impl Guest for Component {
                 .to_string())
             }
 
+            "gpu_bind" => {
+                let claim = v.get("claim").and_then(|c| c.as_str()).unwrap_or_default();
+                let job_id = v.get("job_id").and_then(|j| j.as_str()).unwrap_or_default();
+                if claim.is_empty() || job_id.is_empty() {
+                    return Err(bad("gpu_bind needs both `claim` and `job_id`"));
+                }
+                arbiter::bind_job(claim, job_id);
+                Ok(serde_json::json!({"bound": claim, "job_id": job_id}).to_string())
+            }
+
             "gpu_release" => {
                 let claim = v
                     .get("claim")
@@ -347,7 +400,7 @@ impl Guest for Component {
             other => Err(err(
                 ErrorKind::NotFound,
                 format!("unknown tool '{other}'"),
-                "gpu_status, gpu_find, gpu_acquire, gpu_release",
+                "gpu_status, gpu_find, gpu_acquire, gpu_bind, gpu_release",
             )),
         }
     }

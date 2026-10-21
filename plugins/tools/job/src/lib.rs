@@ -23,6 +23,7 @@ mod bindings {
 
 use bindings::trestle::plugin::base;
 use bindings::trestle::plugin::plugins;
+use bindings::trestle::plugin::tasks;
 use bindings::trestle::plugin::host_services as host;
 use bindings::trestle::plugin::types::{Error, ErrorKind};
 use bindings::Guest;
@@ -221,8 +222,10 @@ impl Guest for Component {
         }
     }
 
-    fn on_tick(_name: String, _payload: String) {
-        // job 插件不注册周期任务。
+    fn on_tick(name: String, _payload: String) {
+        if name == REAP_TASK {
+            reap_gpus();
+        }
     }
 
     /// Web UI 上的任务面板。
@@ -332,13 +335,36 @@ fn job_start(v: &serde_json::Value) -> Result<String, Error> {
         }
     };
 
-    let d: serde_json::Value = serde_json::from_str(&out).map_err(|e| {
-        err(
+    // 下面两种失败都意味着「任务起没起来说不清、也没法登记」——卡得先还回去，
+    // 否则这次占用没有任何 job 记录指着它，谁也不会去还。
+    let give_back = |claim: &str| {
+        if !claim.is_empty() {
+            let _ = plugins::call(
+                "gpu",
+                "gpu_release",
+                &serde_json::json!({"claim": claim}).to_string(),
+            );
+        }
+    };
+    let d: serde_json::Value = match serde_json::from_str(&out) {
+        Ok(d) => d,
+        Err(e) => {
+            give_back(&claim);
+            return Err(err(
+                ErrorKind::Protocol,
+                format!("malformed detach response: {e}"),
+                "",
+            ));
+        }
+    };
+    if d["job_id"].as_str().unwrap_or_default().is_empty() {
+        give_back(&claim);
+        return Err(err(
             ErrorKind::Protocol,
-            format!("malformed detach response: {e}"),
+            format!("the remote did not return a job_id: {out}"),
             "",
-        )
-    })?;
+        ));
+    }
 
     let job = Job {
         job_id: d["job_id"].as_str().unwrap_or_default().to_string(),
@@ -357,6 +383,18 @@ fn job_start(v: &serde_json::Value) -> Result<String, Error> {
         &job_key(&target, &job.job_id),
         &serde_json::to_string(&job).unwrap_or_default(),
     );
+    if !claim.is_empty() {
+        // 卡归这个 job：它活着就一直占着，不会因为「卡上暂时没活」被仲裁者收走。
+        // 绑失败也不致命——退化成没绑时的行为（空闲过久会被收），不值得让任务起失败。
+        let _ = plugins::call(
+            "gpu",
+            "gpu_bind",
+            &serde_json::json!({"claim": claim, "job_id": job.job_id}).to_string(),
+        );
+        // 绑了 job 的卡只在 job 结束时还。光靠 job_list/job_wait 顺手收不够：
+        // 任务跑完没人再问一句，卡就一直挂着。所以定时巡一遍。重复登记是覆盖，不会叠加。
+        tasks::schedule(REAP_TASK, REAP_INTERVAL_MS, "");
+    }
     host::emit(
         "info",
         "job_started",
@@ -540,6 +578,46 @@ fn release_gpus(job: &Job) {
         "gpu_release",
         &serde_json::json!({"claim": job.gpu_claim}).to_string(),
     );
+    // 记录里把凭证划掉：还过的不用再还，巡检也就不会再为它登机一次。
+    let mut done = job.clone();
+    done.gpu_claim.clear();
+    host::state_set(
+        &job_key(&done.target, &done.job_id),
+        &serde_json::to_string(&done).unwrap_or_default(),
+    );
+}
+
+const REAP_TASK: &str = "reap-gpus";
+const REAP_INTERVAL_MS: u32 = 60_000;
+
+/// 巡检：还占着卡的任务里，结束了的把卡还回去；一个都不剩就停掉巡检。
+///
+/// 连不上的机器（比如 VPN 没起来）当作「还在跑」：宁可多占一会儿，
+/// 也不能把一个可能还活着的任务的卡分给别人。
+fn reap_gpus() {
+    let holding: Vec<Job> = all_jobs()
+        .into_iter()
+        .filter(|j| !j.gpu_claim.is_empty())
+        .collect();
+    let mut still = 0;
+    for job in &holding {
+        if exit_code(job).is_some() {
+            release_gpus(job);
+            host::emit(
+                "info",
+                "job_gpus_released",
+                &serde_json::json!({
+                    "target": job.target, "job_id": job.job_id, "gpus": job.gpus
+                })
+                .to_string(),
+            );
+        } else {
+            still += 1;
+        }
+    }
+    if still == 0 {
+        tasks::cancel(REAP_TASK);
+    }
 }
 
 fn job_stop(v: &serde_json::Value) -> Result<String, Error> {

@@ -107,6 +107,21 @@ impl ToolState {
         &self.manifest.capabilities
     }
 
+    /// 这个插件能不能碰这次占用：按它所在池的资源种类比对 `arbitrate`。
+    /// 不存在的 claim 放行——还/绑一个不存在的东西本来就什么都不会发生。
+    async fn may_touch_claim(&mut self, claim: &str, verb: &str) -> bool {
+        match self.arbiter.pool_of_claim(claim).await {
+            Some(pool) if !self.caps().allows_arbitrating(&pool) => {
+                let _ = self.deny(&format!(
+                    "{verb} claim {claim} of {}",
+                    crate::arbiter::pool_kind(&pool)
+                ));
+                false
+            }
+            _ => true,
+        }
+    }
+
     fn deny(&self, action: &str) -> Error {
         self.events.emit(
             &self.plugin,
@@ -214,19 +229,36 @@ impl arbiter::Host for ToolState {
         Ok(serde_json::json!({ "claim": claim.id, "units": claim.units }).to_string())
     }
 
+    // 还、绑、读和要是同一道闸：一个插件能把它不该仲裁的资源的占用还掉，
+    // 互斥就是纸糊的——claim 编号是顺序的（c1, c2, …），盲猜就能猜中。
+
     async fn release(&mut self, claim: String) {
-        self.arbiter.release(&claim).await;
+        if self.may_touch_claim(&claim, "release").await {
+            self.arbiter.release(&claim).await;
+        }
     }
 
     async fn bind_job(&mut self, claim: String, job_id: String) {
-        self.arbiter.bind_job(&claim, &job_id).await;
+        if self.may_touch_claim(&claim, "bind").await {
+            self.arbiter.bind_job(&claim, &job_id).await;
+        }
     }
 
     async fn release_job(&mut self, job_id: String) {
-        self.arbiter.release_job(&job_id).await;
+        let caps = self.caps().clone();
+        self.arbiter
+            .release_job(&job_id, |pool| caps.allows_arbitrating(pool))
+            .await;
     }
 
     async fn claims(&mut self, pool: String) -> String {
+        if !self.caps().allows_arbitrating(&pool) {
+            let _ = self.deny(&format!(
+                "read claims of {}",
+                crate::arbiter::pool_kind(&pool)
+            ));
+            return "[]".into();
+        }
         serde_json::to_string(&self.arbiter.claims_of(&pool).await).unwrap_or_else(|_| "[]".into())
     }
 }
