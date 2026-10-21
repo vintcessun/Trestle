@@ -152,10 +152,10 @@ impl TaskSink for TaskScheduler {
     }
 
     fn cancel(&self, plugin: &str, name: &str) {
-        if let Ok(mut guard) = self.tasks.try_lock() {
-            if guard.remove(&key(plugin, name)).is_some() {
-                self.persist(&guard);
-            }
+        if let Ok(mut guard) = self.tasks.try_lock()
+            && guard.remove(&key(plugin, name)).is_some()
+        {
+            self.persist(&guard);
         }
     }
 }
